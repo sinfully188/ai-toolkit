@@ -3,10 +3,11 @@ import { Eye, Trash2, Pen, Play, Pause, Cog, X } from 'lucide-react';
 import { Button } from '@headlessui/react';
 import { openConfirm } from '@/components/ConfirmModal';
 import { Job } from '@prisma/client';
-import { startJob, stopJob, deleteJob, getAvaliableJobActions, markJobAsStopped } from '@/utils/jobs';
+import { startJob, stopJob, deleteJob, getAvaliableJobActions, markJobAsStopped, getJobConfig } from '@/utils/jobs';
 import { startQueue } from '@/utils/queue';
 import { Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react';
 import { redirect } from 'next/navigation';
+import { validateJobConfig, formatValidationMessage } from '@/utils/validateJobConfig';
 
 interface JobActionBarProps {
   job: Job;
@@ -35,12 +36,43 @@ export default function JobActionBar({
         <Button
           onClick={async () => {
             if (!canStart) return;
-            await startJob(job.id);
-            // start the queue as well
-            if (autoStartQueue) {
-              await startQueue(job.gpu_ids);
+
+            const jobConfig = getJobConfig(job);
+            const validation = validateJobConfig(jobConfig);
+
+            const doStart = async () => {
+              await startJob(job.id);
+              if (autoStartQueue) {
+                await startQueue(job.gpu_ids);
+              }
+              if (onRefresh) onRefresh();
+            };
+
+            if (validation.errors.length > 0) {
+              const message = formatValidationMessage(validation);
+              openConfirm({
+                title: 'Config Validation Issues',
+                message: message + '\n\nStart anyway? The job will likely fail.',
+                type: 'warning',
+                confirmText: 'Start Anyway',
+                onConfirm: doStart,
+              });
+              return;
             }
-            if (onRefresh) onRefresh();
+
+            if (validation.warnings.length > 0) {
+              const message = formatValidationMessage(validation);
+              openConfirm({
+                title: 'Config Warnings',
+                message: message + '\n\nContinue starting?',
+                type: 'info',
+                confirmText: 'Start',
+                onConfirm: doStart,
+              });
+              return;
+            }
+
+            await doStart();
           }}
           className={`ml-2 opacity-100`}
         >

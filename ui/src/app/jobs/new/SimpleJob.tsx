@@ -1,5 +1,5 @@
 'use client';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
   modelArchs,
   ModelArch,
@@ -34,6 +34,66 @@ type Props = {
 
 const isDev = process.env.NODE_ENV === 'development';
 
+const lrSchedulerOptions: SelectOption[] = [
+  { value: 'constant', label: 'Constant' },
+  { value: 'linear', label: 'Linear Decay' },
+  { value: 'cosine', label: 'Cosine Decay' },
+  { value: 'cosine_with_restarts', label: 'Cosine With Restarts' },
+];
+
+const trainingIntentOptions: SelectOption[] = [
+  { value: 'custom', label: 'Custom / Leave As-Is' },
+  { value: 'character', label: 'Face or Character' },
+  { value: 'object', label: 'Object or Product' },
+  { value: 'concept', label: 'General Concept' },
+  { value: 'style', label: 'Style or Look' },
+];
+
+const applyTrainingIntentPreset = (
+  preset: string,
+  setJobConfig: (value: any, key: string) => void,
+) => {
+  const presets: Record<string, { [key: string]: any }> = {
+    character: {
+      'config.process[0].train.steps': 4000,
+      'config.process[0].train.lr': 0.00008,
+      'config.process[0].train.lr_scheduler': 'cosine',
+      'config.process[0].train.lr_scheduler_params': {},
+      'config.process[0].train.content_or_style': 'balanced',
+    },
+    object: {
+      'config.process[0].train.steps': 2500,
+      'config.process[0].train.lr': 0.0001,
+      'config.process[0].train.lr_scheduler': 'cosine',
+      'config.process[0].train.lr_scheduler_params': {},
+      'config.process[0].train.content_or_style': 'balanced',
+    },
+    concept: {
+      'config.process[0].train.steps': 3000,
+      'config.process[0].train.lr': 0.0001,
+      'config.process[0].train.lr_scheduler': 'cosine',
+      'config.process[0].train.lr_scheduler_params': {},
+      'config.process[0].train.content_or_style': 'content',
+    },
+    style: {
+      'config.process[0].train.steps': 2000,
+      'config.process[0].train.lr': 0.00006,
+      'config.process[0].train.lr_scheduler': 'cosine',
+      'config.process[0].train.lr_scheduler_params': {},
+      'config.process[0].train.content_or_style': 'style',
+    },
+  };
+
+  const nextValues = presets[preset];
+  if (!nextValues) {
+    return;
+  }
+
+  for (const [key, value] of Object.entries(nextValues)) {
+    setJobConfig(value, key);
+  }
+};
+
 export default function SimpleJob({
   jobConfig,
   setJobConfig,
@@ -45,6 +105,8 @@ export default function SimpleJob({
   gpuList,
   datasetOptions,
 }: Props) {
+  const [trainingIntentPreset, setTrainingIntentPreset] = useState('custom');
+
   const modelArch = useMemo(() => {
     return modelArchs.find(a => a.name === jobConfig.config.process[0].model.arch) as ModelArch;
   }, [jobConfig.config.process[0].model.arch]);
@@ -143,6 +205,25 @@ export default function SimpleJob({
     }
     return newQuantizationOptions;
   }, [modelArch]);
+
+  const lrScheduler = jobConfig.config.process[0].train.lr_scheduler || 'constant';
+  const lrSchedulerParams = jobConfig.config.process[0].train.lr_scheduler_params || {};
+  const numCycles = lrSchedulerParams.num_cycles;
+
+  const handleLrSchedulerChange = (value: string) => {
+    setJobConfig(value, 'config.process[0].train.lr_scheduler');
+
+    const nextParams = objectCopy(jobConfig.config.process[0].train.lr_scheduler_params || {});
+    if (value === 'cosine_with_restarts') {
+      if (nextParams.num_cycles === undefined || nextParams.num_cycles === null) {
+        nextParams.num_cycles = 1;
+      }
+    } else if ('num_cycles' in nextParams) {
+      delete nextParams.num_cycles;
+    }
+
+    setJobConfig(nextParams, 'config.process[0].train.lr_scheduler_params');
+  };
 
   return (
     <>
@@ -486,7 +567,23 @@ export default function SimpleJob({
               </div>
               <div>
                 <SelectInput
+                  label="Training Intent"
+                  docKey="train.intent_preset"
+                  value={trainingIntentPreset}
+                  onChange={value => {
+                    setTrainingIntentPreset(value);
+                    if (value !== 'custom') {
+                      applyTrainingIntentPreset(value, setJobConfig);
+                    }
+                  }}
+                  options={trainingIntentOptions}
+                />
+                <p className="pt-2 text-xs text-gray-400">
+                  Applies recommended starting values for steps, learning rate, scheduler, and timestep bias.
+                </p>
+                <SelectInput
                   label="Optimizer"
+                  className="pt-2"
                   value={jobConfig.config.process[0].train.optimizer}
                   onChange={value => setJobConfig(value, 'config.process[0].train.optimizer')}
                   options={[
@@ -512,6 +609,31 @@ export default function SimpleJob({
                   min={0}
                   required
                 />
+                <SelectInput
+                  label="LR Scheduler"
+                  docKey="train.lr_scheduler"
+                  className="pt-2"
+                  value={lrScheduler}
+                  onChange={handleLrSchedulerChange}
+                  options={lrSchedulerOptions}
+                />
+                {lrScheduler === 'cosine_with_restarts' && (
+                  <>
+                    <NumberInput
+                      label="Cycles"
+                      docKey="train.lr_scheduler_params.num_cycles"
+                      className="pt-2"
+                      value={numCycles ?? 1}
+                      onChange={value => setJobConfig(value ?? 1, 'config.process[0].train.lr_scheduler_params.num_cycles')}
+                      placeholder="eg. 1"
+                      min={1}
+                      required
+                    />
+                    <p className="pt-2 text-xs text-gray-400">
+                      Cycles means how many times the learning rate jumps back up during training.
+                    </p>
+                  </>
+                )}
               </div>
               <div>
                 {disableSections.includes('train.timestep_type') ? null : (

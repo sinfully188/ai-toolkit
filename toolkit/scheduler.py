@@ -1,3 +1,4 @@
+import math
 import torch
 from typing import Optional
 from diffusers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION, get_constant_schedule_with_warmup
@@ -8,15 +9,31 @@ def get_lr_scheduler(
         optimizer: torch.optim.Optimizer,
         **kwargs,
 ):
+    if name != "cosine_with_restarts" and 'num_cycles' in kwargs:
+        kwargs.pop('num_cycles')
+
     if name == "cosine":
+        if 'num_cycles' in kwargs:
+            kwargs.pop('num_cycles')
         if 'total_iters' in kwargs:
             kwargs['T_max'] = kwargs.pop('total_iters')
         return torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, **kwargs
         )
     elif name == "cosine_with_restarts":
-        if 'total_iters' in kwargs:
-            kwargs['T_0'] = kwargs.pop('total_iters')
+        total_iters = kwargs.pop('total_iters', None)
+        num_cycles = kwargs.pop('num_cycles', None)
+
+        if total_iters is not None:
+            if num_cycles is None:
+                kwargs['T_0'] = total_iters
+            else:
+                hard_resets = max(int(num_cycles), 1)
+                cycle_span = max(math.ceil(total_iters / (hard_resets + 1)), 1)
+                kwargs['T_0'] = cycle_span
+
+        if 'T_mult' not in kwargs:
+            kwargs['T_mult'] = 1
         return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer, **kwargs
         )

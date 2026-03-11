@@ -72,6 +72,8 @@ export const defaultJobConfig: JobConfig = {
           optimizer: 'adamw8bit',
           timestep_type: 'sigmoid',
           content_or_style: 'balanced',
+          lr_scheduler: 'cosine',
+          lr_scheduler_params: {},
           optimizer_params: {
             weight_decay: 1e-4,
           },
@@ -199,5 +201,14 @@ export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
       use_ui_logger: true,
     };
   }
+
+  if (!('lr_scheduler' in jobConfig.config.process[0].train)) {
+    jobConfig.config.process[0].train.lr_scheduler = 'constant';
+  }
+
+  if (!('lr_scheduler_params' in jobConfig.config.process[0].train)) {
+    jobConfig.config.process[0].train.lr_scheduler_params = {};
+  }
+
   return jobConfig;
 };
