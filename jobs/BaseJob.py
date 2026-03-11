@@ -20,6 +20,7 @@ class BaseJob:
             self.meta = config['meta']
         else:
             self.meta = OrderedDict()
+        print(f"[BaseJob] Job initialized: {self.name}")
 
     def get_conf(self, key, default=None, required=False):
         if key in self.config:
@@ -31,9 +32,9 @@ class BaseJob:
 
     def run(self):
         print("")
-        print(f"#############################################")
-        print(f"# Running job: {self.name}")
-        print(f"#############################################")
+        print(f"[BaseJob] #############################################")
+        print(f"[BaseJob] # Running job: {self.name}")
+        print(f"[BaseJob] #############################################")
         print("")
         # implement in child class
         # be sure to call super().run() first
@@ -61,11 +62,15 @@ class BaseJob:
                 else:
                     # it is the class
                     ProcessClass = process_dict[process['type']]
+                print(f"[BaseJob] Loading process {i}: {process['type']}")
                 self.process.append(ProcessClass(i, self, process))
+                print(f"[BaseJob] Process {i} ({process['type']}) loaded successfully")
             else:
                 raise ValueError(f'config file is invalid. Unknown process type: {process["type"]}')
+        print(f"[BaseJob] All {len(self.process)} process(es) loaded successfully")
 
     def cleanup(self):
         # if you implement this in child clas,
         # be sure to call super().cleanup() LAST
+        print(f"[BaseJob] Cleaning up job: {self.name}")
         del self
