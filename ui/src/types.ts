@@ -116,6 +116,11 @@ export interface EMAConfig {
   ema_decay: number;
 }
 
+export interface LRSchedulerParams {
+  num_cycles?: number;
+  [key: string]: any;
+}
+
 export interface TrainConfig {
   batch_size: number;
   bypass_guidance_embedding?: boolean;
@@ -129,6 +134,8 @@ export interface TrainConfig {
   content_or_style: string;
   optimizer: string;
   lr: number;
+  lr_scheduler: string;
+  lr_scheduler_params?: LRSchedulerParams;
   ema_config?: EMAConfig;
   dtype: string;
   unload_text_encoder: boolean;

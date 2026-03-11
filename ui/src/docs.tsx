@@ -174,6 +174,43 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'train.lr_scheduler': {
+    title: 'LR Scheduler',
+    description: (
+      <>
+        Controls how the optimizer learning rate changes across training.
+        <br />
+        <br />
+        <strong>Constant</strong> keeps the same learning rate throughout. <strong>Linear</strong> decays it steadily.
+        <strong> Cosine</strong> decays smoothly. <strong>Cosine With Restarts</strong> periodically jumps back up to a
+        higher learning rate before decaying again.
+      </>
+    ),
+  },
+  'train.lr_scheduler_params.num_cycles': {
+    title: 'LR Scheduler Cycles',
+    description: (
+      <>
+        Only used with <strong>Cosine With Restarts</strong>.
+        <br />
+        <br />
+        Cycles means the number of hard learning-rate restarts during the run. A value of <strong>1</strong> means
+        the learning rate decays once, jumps back up once, then decays again.
+      </>
+    ),
+  },
+  'train.intent_preset': {
+    title: 'Training Intent Preset',
+    description: (
+      <>
+        Applies recommended starting values for broad LoRA goals.
+        <br />
+        <br />
+        These presets are not strict rules. They are intended as practical defaults you can adjust after inspecting
+        samples.
+      </>
+    ),
+  },
   'model.multistage': {
     title: 'Stages to Train',
     description: (
