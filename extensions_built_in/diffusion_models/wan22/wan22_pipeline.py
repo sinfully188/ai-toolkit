@@ -250,6 +250,12 @@ class Wan22Pipeline(WanPipeline):
                     attention_kwargs=attention_kwargs,
                     return_dict=False,
                 )[0]
+                if noise_pred.shape[1] != latents.shape[1]:
+                    if noise_pred.shape[1] < latents.shape[1]:
+                        raise ValueError(
+                            f"WAN 2.2 pipeline predicted {noise_pred.shape[1]} channels for latents with {latents.shape[1]} channels"
+                        )
+                    noise_pred = noise_pred[:, : latents.shape[1]]
 
                 if self.do_classifier_free_guidance:
                     noise_uncond = current_model(
@@ -259,6 +265,12 @@ class Wan22Pipeline(WanPipeline):
                         attention_kwargs=attention_kwargs,
                         return_dict=False,
                     )[0]
+                    if noise_uncond.shape[1] != latents.shape[1]:
+                        if noise_uncond.shape[1] < latents.shape[1]:
+                            raise ValueError(
+                                f"WAN 2.2 pipeline predicted {noise_uncond.shape[1]} unconditional channels for latents with {latents.shape[1]} channels"
+                            )
+                        noise_uncond = noise_uncond[:, : latents.shape[1]]
                     noise_pred = noise_uncond + current_guidance_scale * \
                         (noise_pred - noise_uncond)
 
