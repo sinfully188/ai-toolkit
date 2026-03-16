@@ -24,7 +24,9 @@ from toolkit.job import get_job
 from toolkit.accelerator import get_accelerator
 from toolkit.print import print_acc, setup_log_to_file
 
+print("[run.py] Initializing toolkit...", file=sys.stderr, flush=True)
 accelerator = get_accelerator()
+print("[run.py] Accelerator initialized", file=sys.stderr, flush=True)
 
 
 def print_end_message(jobs_completed, jobs_failed):
@@ -34,16 +36,17 @@ def print_end_message(jobs_completed, jobs_failed):
     completed_string = f"{jobs_completed} completed job{'' if jobs_completed == 1 else 's'}"
 
     print_acc("")
-    print_acc("========================================")
-    print_acc("Result:")
+    print_acc("[run.py] ========================================")
+    print_acc("[run.py] FINAL RESULT:")
     if len(completed_string) > 0:
-        print_acc(f" - {completed_string}")
+        print_acc(f"[run.py]  - {completed_string}")
     if len(failure_string) > 0:
-        print_acc(f" - {failure_string}")
-    print_acc("========================================")
+        print_acc(f"[run.py]  - {failure_string}")
+    print_acc("[run.py] ========================================")
 
 
 def main():
+    print("[run.py] Starting main()", file=sys.stderr, flush=True)
     parser = argparse.ArgumentParser()
 
     # require at lease one config file
@@ -77,7 +80,10 @@ def main():
     )
     args = parser.parse_args()
     
+    print(f"[run.py] Arguments parsed: config_files={args.config_file_list}, log={args.log}, recover={args.recover}", file=sys.stderr, flush=True)
+    
     if args.log is not None:
+        print_acc(f"[run.py] Setting up logging to file: {args.log}")
         setup_log_to_file(args.log)
 
     config_file_list = args.config_file_list
@@ -88,33 +94,62 @@ def main():
     jobs_failed = 0
 
     if accelerator.is_main_process:
-        print_acc(f"Running {len(config_file_list)} job{'' if len(config_file_list) == 1 else 's'}")
+        print_acc(f"[run.py] Running {len(config_file_list)} job{'' if len(config_file_list) == 1 else 's'}")
+        print_acc(f"[run.py] Job ID: {os.environ.get('AITK_JOB_ID', 'NOT SET')}")
+        print_acc(f"[run.py] CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'NOT SET')}")
 
-    for config_file in config_file_list:
+    for i, config_file in enumerate(config_file_list, 1):
         try:
+            print_acc(f"[run.py] Processing job {i}/{len(config_file_list)}: {config_file}")
+            print(f"[run.py] Loading job config from: {config_file}", file=sys.stderr, flush=True)
+            
             job = get_job(config_file, args.name)
+            
+            print_acc(f"[run.py] Job loaded successfully: {job.name}")
+            print_acc(f"[run.py] Starting job execution...")
+            
             job.run()
+            
+            print_acc(f"[run.py] Job execution completed successfully")
+            print_acc(f"[run.py] Cleaning up job resources...")
+            
             job.cleanup()
+            
             jobs_completed += 1
+            print_acc(f"[run.py] Job {i} completed successfully")
+            
         except Exception as e:
-            print_acc(f"Error running job: {e}")
+            print_acc(f"[run.py] ERROR running job {i}: {str(e)}")
+            print(f"[run.py] Exception details: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            import traceback
+            print_acc(f"[run.py] Traceback: {traceback.format_exc()}")
+            
             jobs_failed += 1
             try:
-                job.process[0].on_error(e)
+                if 'job' in locals() and hasattr(job, 'process') and len(job.process) > 0:
+                    print_acc(f"[run.py] Calling on_error handler...")
+                    job.process[0].on_error(e)
             except Exception as e2:
-                print_acc(f"Error running on_error: {e2}")
+                print_acc(f"[run.py] Error running on_error handler: {e2}")
             if not args.recover:
                 print_end_message(jobs_completed, jobs_failed)
                 raise e
         except KeyboardInterrupt as e:
+            print_acc(f"[run.py] KeyboardInterrupt caught - stopping job")
             try:
-                job.process[0].on_error(e)
+                if 'job' in locals() and hasattr(job, 'process') and len(job.process) > 0:
+                    job.process[0].on_error(e)
             except Exception as e2:
-                print_acc(f"Error running on_error: {e2}")
+                print_acc(f"[run.py] Error running on_error handler: {e2}")
             if not args.recover:
                 print_end_message(jobs_completed, jobs_failed)
                 raise e
+    
+    print_end_message(jobs_completed, jobs_failed)
+    print(f"[run.py] main() completed", file=sys.stderr, flush=True)
 
 
 if __name__ == '__main__':
+    print("[run.py] Script started", file=sys.stderr, flush=True)
     main()
+    print("[run.py] Script finished", file=sys.stderr, flush=True)

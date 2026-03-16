@@ -19,6 +19,8 @@ import SimpleJob from './SimpleJob';
 import AdvancedJob from './AdvancedJob';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { apiClient } from '@/utils/api';
+import { validateJobConfig, formatValidationMessage } from '@/utils/validateJobConfig';
+import { openConfirm } from '@/components/ConfirmModal';
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -100,10 +102,7 @@ export default function TrainingForm() {
     }
   }, [settings, isSettingsLoaded]);
 
-  const saveJob = async () => {
-    if (status === 'saving') return;
-    setStatus('saving');
-
+  const doSave = async () => {
     apiClient
       .post('/api/jobs', {
         id: runId,
@@ -132,6 +131,40 @@ export default function TrainingForm() {
           setStatus('idle');
         }, 2000),
       );
+  };
+
+  const saveJob = async () => {
+    if (status === 'saving') return;
+    setStatus('saving');
+
+    const validation = validateJobConfig(jobConfig);
+    if (validation.errors.length > 0) {
+      const message = formatValidationMessage(validation);
+      openConfirm({
+        title: 'Config Validation Issues',
+        message: message + '\n\nSave anyway?',
+        type: 'warning',
+        confirmText: 'Save Anyway',
+        onConfirm: () => doSave(),
+        onCancel: () => setStatus('idle'),
+      });
+      return;
+    }
+
+    if (validation.warnings.length > 0) {
+      const message = formatValidationMessage(validation);
+      openConfirm({
+        title: 'Config Warnings',
+        message: message + '\n\nContinue saving?',
+        type: 'info',
+        confirmText: 'Save',
+        onConfirm: () => doSave(),
+        onCancel: () => setStatus('idle'),
+      });
+      return;
+    }
+
+    doSave();
   };
 
   const handleSubmit = async (e: React.FormEvent) => {

@@ -1,0 +1,657 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+import platform
+import sqlite3
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+SCRIPT_PATH = Path(__file__).resolve()
+DEFAULT_DB_PATH = SCRIPT_PATH.parent.parent / "aitk_db.db"
+EXPORT_FORMAT = "ai-toolkit-job-export"
+EXPORT_VERSION = 1
+ACTIVE_STATUSES = {"running", "stopping"}
+HELP_EPILOG = f"""
+Common workflow:
+    1. Repair stale running state if needed:
+             ai-toolkit-job-cli mark-stopped --id JOB_ID
+
+    2. Export or move the job from the source DB:
+             ai-toolkit-job-cli move --id JOB_ID /tmp/job.json
+
+    3. Import it into another DB:
+             ai-toolkit-job-cli --db /path/to/other/aitk_db.db import /tmp/job.json --create-queue
+
+Safety rules:
+    - move and delete refuse DB rows with status running/stopping unless --allow-active is used.
+    - mark-stopped, move, and delete inspect pid.txt and refuse to override a live ai-toolkit-like
+        process unless --force is used.
+    - --allow-active bypasses the DB status guard.
+    - --force bypasses the live PID guard.
+
+Default DB:
+    {DEFAULT_DB_PATH}
+""".strip()
+
+
+def warn(message: str) -> None:
+    print(f"Warning: {message}", file=sys.stderr)
+
+
+def fail(message: str, exit_code: int = 1) -> None:
+    print(f"Error: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def open_db(db_path: Path) -> sqlite3.Connection:
+    if not db_path.exists():
+        fail(f"database does not exist: {db_path}")
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def row_to_dict(row: sqlite3.Row | None) -> dict | None:
+    if row is None:
+        return None
+    return {key: row[key] for key in row.keys()}
+
+
+def parse_job_config(raw_job_config: str) -> dict | None:
+    try:
+        return json.loads(raw_job_config)
+    except json.JSONDecodeError:
+        return None
+
+
+def get_job_process_config(job: sqlite3.Row | dict) -> dict | None:
+    job_config = parse_job_config(job["job_config"])
+    if not job_config:
+        return None
+    config = job_config.get("config")
+    if not isinstance(config, dict):
+        return None
+    processes = config.get("process")
+    if not isinstance(processes, list) or not processes:
+        return None
+    first_process = processes[0]
+    if not isinstance(first_process, dict):
+        return None
+    return first_process
+
+
+def get_job_pid_file(job: sqlite3.Row | dict) -> Path | None:
+    process_config = get_job_process_config(job)
+    if process_config is None:
+        return None
+    training_root = process_config.get("training_folder")
+    if not training_root:
+        return None
+    return Path(training_root) / job["name"] / "pid.txt"
+
+
+def read_job_pid(job: sqlite3.Row | dict) -> tuple[Path | None, int | None]:
+    pid_file = get_job_pid_file(job)
+    if pid_file is None or not pid_file.exists():
+        return pid_file, None
+    try:
+        raw_pid = pid_file.read_text(encoding="utf-8").strip()
+        if raw_pid == "":
+            return pid_file, None
+        return pid_file, int(raw_pid)
+    except (OSError, ValueError):
+        return pid_file, None
+
+
+def pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def get_process_snapshot_linux(pid: int) -> dict:
+    snapshot = {"pid": pid, "exists": False, "name": "", "exe": "", "cmdline": ""}
+    proc_dir = Path("/proc") / str(pid)
+    if not proc_dir.exists():
+        return snapshot
+    snapshot["exists"] = True
+    try:
+        snapshot["name"] = (proc_dir / "comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    try:
+        snapshot["exe"] = os.readlink(proc_dir / "exe")
+    except OSError:
+        pass
+    try:
+        cmdline = (proc_dir / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+        snapshot["cmdline"] = cmdline
+    except OSError:
+        pass
+    return snapshot
+
+
+def get_process_snapshot_windows(pid: int) -> dict:
+    snapshot = {"pid": pid, "exists": False, "name": "", "exe": "", "cmdline": ""}
+    command = [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        (
+            "$p = Get-CimInstance Win32_Process -Filter \"ProcessId = %d\"; "
+            "if ($null -eq $p) { exit 1 }; "
+            "Write-Output $p.Name; Write-Output $p.ExecutablePath; Write-Output $p.CommandLine"
+        )
+        % pid,
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+    except OSError:
+        return snapshot
+    if result.returncode != 0:
+        return snapshot
+    lines = result.stdout.splitlines()
+    snapshot["exists"] = True
+    if len(lines) > 0:
+        snapshot["name"] = lines[0].strip()
+    if len(lines) > 1:
+        snapshot["exe"] = lines[1].strip()
+    if len(lines) > 2:
+        snapshot["cmdline"] = "\n".join(lines[2:]).strip()
+    return snapshot
+
+
+def get_process_snapshot_generic(pid: int) -> dict:
+    snapshot = {"pid": pid, "exists": False, "name": "", "exe": "", "cmdline": ""}
+    if not pid_exists(pid):
+        return snapshot
+    snapshot["exists"] = True
+    try:
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, check=False)
+    except OSError:
+        return snapshot
+    if result.returncode == 0:
+        snapshot["cmdline"] = result.stdout.strip()
+    return snapshot
+
+
+def get_process_snapshot(pid: int) -> dict:
+    system = platform.system().lower()
+    if system == "linux":
+        return get_process_snapshot_linux(pid)
+    if system == "windows":
+        return get_process_snapshot_windows(pid)
+    return get_process_snapshot_generic(pid)
+
+
+def looks_like_ai_toolkit_process(job: sqlite3.Row | dict, snapshot: dict) -> bool:
+    haystacks = [snapshot.get("cmdline", ""), snapshot.get("exe", ""), snapshot.get("name", "")]
+    joined = " ".join(haystacks).lower()
+    job_name = str(job["name"]).lower()
+    if "run.py" in joined and ("ai-toolkit" in joined or job_name in joined):
+        return True
+    if ".job_config.json" in joined and job_name in joined:
+        return True
+    if "aitk_db.db" in joined and "python" in joined:
+        return True
+    return False
+
+
+def inspect_job_process(job: sqlite3.Row | dict) -> dict:
+    pid_file, pid = read_job_pid(job)
+    details = {
+        "pid_file": str(pid_file) if pid_file else None,
+        "pid": pid,
+        "exists": False,
+        "looks_like_ai_toolkit": False,
+        "snapshot": None,
+    }
+    if pid is None:
+        return details
+    snapshot = get_process_snapshot(pid)
+    details["exists"] = snapshot.get("exists", False)
+    details["looks_like_ai_toolkit"] = snapshot.get("exists", False) and looks_like_ai_toolkit_process(job, snapshot)
+    details["snapshot"] = snapshot
+    return details
+
+
+def get_job_identifier_clause(args: argparse.Namespace) -> tuple[str, str]:
+    if getattr(args, "job_id", None):
+        return "id = ?", args.job_id
+    if getattr(args, "name", None):
+        return "name = ?", args.name
+    fail("provide either --id or --name")
+
+
+def get_job(connection: sqlite3.Connection, args: argparse.Namespace) -> sqlite3.Row:
+    where_clause, value = get_job_identifier_clause(args)
+    row = connection.execute(f"SELECT * FROM Job WHERE {where_clause}", (value,)).fetchone()
+    if row is None:
+        fail(f"job not found for {where_clause.split()[0]}={value}")
+    return row
+
+
+def get_queue(connection: sqlite3.Connection, gpu_ids: str) -> sqlite3.Row | None:
+    return connection.execute("SELECT * FROM Queue WHERE gpu_ids = ?", (gpu_ids,)).fetchone()
+
+
+def require_safe_job_action(job: sqlite3.Row, allow_active: bool, force: bool, action_name: str) -> dict:
+    process_details = inspect_job_process(job)
+    if not allow_active and job["status"] in ACTIVE_STATUSES:
+        fail(
+            f"job '{job['name']}' is {job['status']}; rerun with --allow-active if you really want this"
+        )
+    if process_details["exists"] and process_details["looks_like_ai_toolkit"]:
+        pid = process_details["pid"]
+        pid_file = process_details["pid_file"] or "<unknown pid file>"
+        if not force:
+            fail(
+                f"job '{job['name']}' has a live ai-toolkit-like process at pid {pid} from {pid_file}; "
+                f"refusing to {action_name} without --force"
+            )
+        warn(
+            f"forcing {action_name} even though pid {pid} from {pid_file} still looks like an ai-toolkit process"
+        )
+    elif process_details["exists"]:
+        pid = process_details["pid"]
+        if force:
+            warn(f"forcing {action_name} while pid {pid} is still alive, but it does not clearly look like ai-toolkit")
+        else:
+            warn(f"pid {pid} is still alive for job '{job['name']}', but it does not clearly look like ai-toolkit")
+    return process_details
+
+
+def build_export_payload(connection: sqlite3.Connection, job: sqlite3.Row, source_db: Path) -> dict:
+    queue = get_queue(connection, job["gpu_ids"])
+    return {
+        "format": EXPORT_FORMAT,
+        "version": EXPORT_VERSION,
+        "exported_at": utc_now_iso(),
+        "source_db": str(source_db),
+        "job": row_to_dict(job),
+        "job_config_parsed": parse_job_config(job["job_config"]),
+        "queue": row_to_dict(queue),
+    }
+
+
+def resolve_export_path(output_path: Path, job: sqlite3.Row) -> Path:
+    if output_path.exists() and output_path.is_dir():
+        safe_name = "".join(char if char.isalnum() or char in "-_." else "_" for char in job["name"])
+        return output_path / f"{safe_name}.json"
+    return output_path
+
+
+def write_export_file(payload: dict, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
+def command_list(args: argparse.Namespace) -> int:
+    with open_db(args.db) as connection:
+        clauses = []
+        params = []
+        if args.status:
+            clauses.append("status = ?")
+            params.append(args.status)
+        if args.gpu_ids is not None:
+            clauses.append("gpu_ids = ?")
+            params.append(args.gpu_ids)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = connection.execute(
+            f"SELECT id, name, status, gpu_ids, step, queue_position, updated_at FROM Job {where_sql} ORDER BY created_at ASC",
+            params,
+        ).fetchall()
+
+    records = [row_to_dict(row) for row in rows]
+    if args.json:
+        print(json.dumps(records, indent=2))
+        return 0
+
+    if not records:
+        print("No jobs found")
+        return 0
+
+    header = f"{'ID':36}  {'STATUS':10}  {'GPU':8}  {'STEP':8}  {'QUEUE':8}  NAME"
+    print(header)
+    print("-" * len(header))
+    for record in records:
+        print(
+            f"{record['id']:36}  {record['status'][:10]:10}  {record['gpu_ids'][:8]:8}  "
+            f"{str(record['step'])[:8]:8}  {str(record['queue_position'])[:8]:8}  {record['name']}"
+        )
+    return 0
+
+
+def command_export(args: argparse.Namespace) -> int:
+    with open_db(args.db) as connection:
+        job = get_job(connection, args)
+        payload = build_export_payload(connection, job, args.db)
+
+    output_path = resolve_export_path(args.output, job)
+    write_export_file(payload, output_path)
+    print(f"Exported job '{job['name']}' to {output_path}")
+    return 0
+
+
+def command_move(args: argparse.Namespace) -> int:
+    with open_db(args.db) as connection:
+        job = get_job(connection, args)
+        require_safe_job_action(job, args.allow_active, args.force, "move the job")
+        payload = build_export_payload(connection, job, args.db)
+        output_path = resolve_export_path(args.output, job)
+        write_export_file(payload, output_path)
+
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute("DELETE FROM Job WHERE id = ?", (job["id"],))
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    print(f"Moved job '{job['name']}' to {output_path} and deleted it from {args.db}")
+    return 0
+
+
+def load_import_payload(input_path: Path) -> dict:
+    if not input_path.exists():
+        fail(f"import file does not exist: {input_path}")
+    with input_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if payload.get("format") != EXPORT_FORMAT:
+        fail(f"unsupported import format in {input_path}")
+    if payload.get("version") != EXPORT_VERSION:
+        fail(f"unsupported import version in {input_path}: {payload.get('version')}")
+    job = payload.get("job")
+    if not isinstance(job, dict):
+        fail(f"missing job payload in {input_path}")
+    return payload
+
+
+def existing_job_conflict(connection: sqlite3.Connection, job: dict) -> sqlite3.Row | None:
+    return connection.execute(
+        "SELECT * FROM Job WHERE id = ? OR name = ?",
+        (job["id"], job["name"]),
+    ).fetchone()
+
+
+def normalize_import_job(job: dict, preserve_status: bool) -> dict:
+    normalized = dict(job)
+    if not preserve_status:
+        normalized["status"] = "stopped"
+        normalized["stop"] = 0
+        normalized["return_to_queue"] = 0
+        normalized["info"] = ""
+        normalized["speed_string"] = ""
+    return normalized
+
+
+def insert_job(connection: sqlite3.Connection, job: dict) -> None:
+    columns = [
+        "id",
+        "name",
+        "gpu_ids",
+        "job_config",
+        "created_at",
+        "updated_at",
+        "status",
+        "stop",
+        "return_to_queue",
+        "step",
+        "info",
+        "speed_string",
+        "queue_position",
+    ]
+    values = [job.get(column) for column in columns]
+    placeholders = ", ".join("?" for _ in columns)
+    connection.execute(
+        f"INSERT INTO Job ({', '.join(columns)}) VALUES ({placeholders})",
+        values,
+    )
+
+
+def maybe_insert_queue(connection: sqlite3.Connection, queue: dict | None, create_queue: bool) -> None:
+    if not create_queue or not queue:
+        return
+    connection.execute(
+        "INSERT OR IGNORE INTO Queue (gpu_ids, is_running) VALUES (?, ?)",
+        (queue["gpu_ids"], queue.get("is_running", 0)),
+    )
+
+
+def command_import(args: argparse.Namespace) -> int:
+    payload = load_import_payload(args.input)
+    job = normalize_import_job(payload["job"], args.preserve_status)
+    queue = payload.get("queue")
+
+    with open_db(args.db) as connection:
+        conflict = existing_job_conflict(connection, job)
+        if conflict is not None:
+            if not args.replace:
+                fail(
+                    f"job conflict in {args.db}: existing id={conflict['id']} name={conflict['name']}. "
+                    "Use --replace to overwrite."
+                )
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute("DELETE FROM Job WHERE id = ? OR name = ?", (job["id"], job["name"]))
+                maybe_insert_queue(connection, queue, args.create_queue)
+                insert_job(connection, job)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        else:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                maybe_insert_queue(connection, queue, args.create_queue)
+                insert_job(connection, job)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    print(f"Imported job '{job['name']}' into {args.db}")
+    return 0
+
+
+def command_delete(args: argparse.Namespace) -> int:
+    with open_db(args.db) as connection:
+        job = get_job(connection, args)
+        require_safe_job_action(job, args.allow_active, args.force, "delete the job")
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute("DELETE FROM Job WHERE id = ?", (job["id"],))
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    print(f"Deleted job '{job['name']}' from {args.db}")
+    return 0
+
+
+def command_mark_stopped(args: argparse.Namespace) -> int:
+    with open_db(args.db) as connection:
+        job = get_job(connection, args)
+        require_safe_job_action(job, True, args.force, "mark the job as stopped")
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(
+                (
+                    "UPDATE Job SET status = ?, stop = ?, return_to_queue = ?, info = ?, speed_string = ?, "
+                    "updated_at = ? WHERE id = ?"
+                ),
+                ("stopped", 0, 0, args.info, "", int(datetime.now(timezone.utc).timestamp() * 1000), job["id"]),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    print(f"Marked job '{job['name']}' as stopped in {args.db}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Manage ai-toolkit jobs inside an aitk_db.db file.",
+        epilog=HELP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"Path to the SQLite job database. Default: {DEFAULT_DB_PATH}",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    list_parser = subparsers.add_parser(
+        "list",
+        help="List jobs in the database",
+        description="List jobs from the selected ai-toolkit database.",
+    )
+    list_parser.add_argument("--status", help="Filter by job status")
+    list_parser.add_argument("--gpu-ids", help="Filter by gpu_ids")
+    list_parser.add_argument("--json", action="store_true", help="Print JSON instead of a table")
+    list_parser.set_defaults(func=command_list)
+
+    for command_name, help_text in [
+        ("export", "Export a job to JSON"),
+        ("move", "Export a job to JSON and remove it from the source DB"),
+        ("delete", "Delete a job row from the source DB"),
+    ]:
+        command_parser = subparsers.add_parser(
+            command_name,
+            help=help_text,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+        identifier_group = command_parser.add_mutually_exclusive_group(required=True)
+        identifier_group.add_argument("--id", dest="job_id", help="Job id")
+        identifier_group.add_argument("--name", help="Job name")
+        if command_name in {"export", "move"}:
+            command_parser.add_argument("output", type=Path, help="Output JSON path or directory")
+        if command_name in {"move", "delete"}:
+            command_parser.add_argument(
+                "--allow-active",
+                action="store_true",
+                help="Allow acting on running or stopping jobs",
+            )
+            command_parser.add_argument(
+                "--force",
+                action="store_true",
+                help="Override a live ai-toolkit-like PID check",
+            )
+        if command_name == "export":
+            command_parser.description = (
+                "Export one Job row to JSON. This does not modify the source database.\n\n"
+                "Example:\n"
+                "  ai-toolkit-job-cli export --name MyJob /tmp/myjob.json"
+            )
+            command_parser.set_defaults(func=command_export)
+        elif command_name == "move":
+            command_parser.description = (
+                "Export one Job row to JSON and then delete it from the source database.\n\n"
+                "Use this for machine-to-machine handoff after the job is stopped.\n"
+                "If the DB row is still marked running/stopping, add --allow-active.\n"
+                "If pid.txt still points to a live ai-toolkit-like process, add --force only when you are certain\n"
+                "the process should be ignored."
+            )
+            command_parser.set_defaults(func=command_move)
+        else:
+            command_parser.description = (
+                "Delete one Job row from the database.\n\n"
+                "This does not delete checkpoints or output folders on disk.\n"
+                "If pid.txt still points to a live ai-toolkit-like process, --force is required."
+            )
+            command_parser.set_defaults(func=command_delete)
+
+    mark_stopped_parser = subparsers.add_parser(
+        "mark-stopped",
+        help="Mark a job row as stopped after checking for a live process",
+        description=(
+            "Repair a stale job row by marking it stopped.\n\n"
+            "The command checks pid.txt under <training_folder>/<job_name>/pid.txt.\n"
+            "If that PID is alive and still looks like an ai-toolkit process, the command refuses to act\n"
+            "unless --force is supplied.\n\n"
+            "Example:\n"
+            "  ai-toolkit-job-cli mark-stopped --id JOB_ID\n"
+            "  ai-toolkit-job-cli mark-stopped --id JOB_ID --force"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    identifier_group = mark_stopped_parser.add_mutually_exclusive_group(required=True)
+    identifier_group.add_argument("--id", dest="job_id", help="Job id")
+    identifier_group.add_argument("--name", help="Job name")
+    mark_stopped_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Override a live ai-toolkit-like PID check",
+    )
+    mark_stopped_parser.add_argument(
+        "--info",
+        default="Marked stopped by ai-toolkit-job-cli",
+        help="Info string to store in the job row",
+    )
+    mark_stopped_parser.set_defaults(func=command_mark_stopped)
+
+    import_parser = subparsers.add_parser(
+        "import",
+        help="Import a job JSON file into a DB",
+        description=(
+            "Import a previously exported job JSON file into the selected database.\n\n"
+            "By default, imported jobs are normalized to a safe stopped state:\n"
+            "  status = stopped\n"
+            "  stop = 0\n"
+            "  return_to_queue = 0\n\n"
+            "Use --preserve-status only when you explicitly want the original exported status."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    import_parser.add_argument("input", type=Path, help="Path to an exported job JSON file")
+    import_parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="Replace any existing job with the same id or name",
+    )
+    import_parser.add_argument(
+        "--preserve-status",
+        action="store_true",
+        help="Preserve the exported status instead of forcing the imported job to stopped",
+    )
+    import_parser.add_argument(
+        "--create-queue",
+        action="store_true",
+        help="Create the exported gpu_ids queue if it is missing in the target DB",
+    )
+    import_parser.set_defaults(func=command_import)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    args.db = args.db.resolve()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
