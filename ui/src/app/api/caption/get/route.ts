@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { getDatasetsRoot } from '@/server/settings';
+import { isPathAllowed, pathContainsTraversal } from '@/server/pathSecurity';
 
 export async function POST(request: NextRequest) {
   
@@ -21,7 +22,7 @@ export async function POST(request: NextRequest) {
     const allowedDir = await getDatasetsRoot();
 
     // Security check: Ensure path is in allowed directory
-    const isAllowed = filepath.startsWith(allowedDir) && !filepath.includes('..');
+    const isAllowed = !pathContainsTraversal(filepath) && (await isPathAllowed(filepath, [allowedDir]));
 
     if (!isAllowed) {
       console.warn(`Access denied: ${filepath} not in ${allowedDir}`);

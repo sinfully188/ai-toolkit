@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { defaultDatasetsFolder, defaultDataRoot } from '@/paths';
 import { defaultTrainFolder } from '@/paths';
 import NodeCache from 'node-cache';
+import { canonicalizeConfiguredPath } from '@/server/pathSecurity';
 
 const myCache = new NodeCache();
 const prisma = new PrismaClient();
@@ -25,6 +26,7 @@ export const getDatasetsRoot = async () => {
   if (row?.value && row.value !== '') {
     datasetsPath = row.value;
   }
+  datasetsPath = await canonicalizeConfiguredPath(datasetsPath);
   myCache.set(key, datasetsPath);
   return datasetsPath as string;
 };
@@ -44,6 +46,7 @@ export const getTrainingFolder = async () => {
   if (row?.value && row.value !== '') {
     trainingRoot = row.value;
   }
+  trainingRoot = await canonicalizeConfiguredPath(trainingRoot);
   myCache.set(key, trainingRoot);
   return trainingRoot as string;
 };
@@ -82,6 +85,7 @@ export const getDataRoot = async () => {
   if (row?.value && row.value !== '') {
     dataRoot = row.value;
   }
+  dataRoot = await canonicalizeConfiguredPath(dataRoot);
   myCache.set(key, dataRoot);
   return dataRoot;
 };

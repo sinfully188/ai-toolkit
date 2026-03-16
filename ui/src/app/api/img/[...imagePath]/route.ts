@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { getDatasetsRoot, getTrainingFolder, getDataRoot } from '@/server/settings';
+import { isPathAllowed, pathContainsTraversal } from '@/server/pathSecurity';
 
 export async function GET(request: NextRequest, { params }: { params: { imagePath: string } }) {
   const { imagePath } = await params;
@@ -18,7 +19,7 @@ export async function GET(request: NextRequest, { params }: { params: { imagePat
     const allowedDirs = [datasetRoot, trainingRoot, dataRoot];
 
     // Security check: Ensure path is in allowed directory
-    const isAllowed = allowedDirs.some(allowedDir => filepath.startsWith(allowedDir)) && !filepath.includes('..');
+    const isAllowed = !pathContainsTraversal(filepath) && (await isPathAllowed(filepath, allowedDirs));
 
     if (!isAllowed) {
       console.warn(`Access denied: ${filepath} not in ${allowedDirs.join(', ')}`);

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import { getDatasetsRoot, getTrainingFolder } from '@/server/settings';
+import { isPathAllowed, pathContainsTraversal } from '@/server/pathSecurity';
 
 export async function POST(request: Request) {
   try {
@@ -10,7 +11,7 @@ export async function POST(request: Request) {
     const trainingPath = await getTrainingFolder();
 
     // make sure the dataset path is in the image path
-    if (!imgPath.startsWith(datasetsPath) && !imgPath.startsWith(trainingPath)) {
+    if (pathContainsTraversal(imgPath) || !(await isPathAllowed(imgPath, [datasetsPath, trainingPath]))) {
       return NextResponse.json({ error: 'Invalid image path' }, { status: 400 });
     }
 
