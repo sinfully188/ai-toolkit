@@ -29,7 +29,7 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { HF_TOKEN, TRAINING_FOLDER, DATASETS_FOLDER } = body;
+    const { HF_TOKEN, TRAINING_FOLDER, DATASETS_FOLDER, POWER_PRICE_PER_KWH, POWER_PRICE_CURRENCY } = body;
 
     // Upsert both settings
     await Promise.all([
@@ -47,6 +47,16 @@ export async function POST(request: Request) {
         where: { key: 'DATASETS_FOLDER' },
         update: { value: DATASETS_FOLDER },
         create: { key: 'DATASETS_FOLDER', value: DATASETS_FOLDER },
+      }),
+      prisma.settings.upsert({
+        where: { key: 'POWER_PRICE_PER_KWH' },
+        update: { value: POWER_PRICE_PER_KWH || '' },
+        create: { key: 'POWER_PRICE_PER_KWH', value: POWER_PRICE_PER_KWH || '' },
+      }),
+      prisma.settings.upsert({
+        where: { key: 'POWER_PRICE_CURRENCY' },
+        update: { value: POWER_PRICE_CURRENCY || '' },
+        create: { key: 'POWER_PRICE_CURRENCY', value: POWER_PRICE_CURRENCY || '' },
       }),
     ]);
 

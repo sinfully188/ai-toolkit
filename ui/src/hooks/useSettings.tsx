@@ -7,6 +7,8 @@ export interface Settings {
   HF_TOKEN: string;
   TRAINING_FOLDER: string;
   DATASETS_FOLDER: string;
+  POWER_PRICE_PER_KWH: string;
+  POWER_PRICE_CURRENCY: string;
 }
 
 export default function useSettings() {
@@ -14,6 +16,8 @@ export default function useSettings() {
     HF_TOKEN: '',
     TRAINING_FOLDER: '',
     DATASETS_FOLDER: '',
+    POWER_PRICE_PER_KWH: '',
+    POWER_PRICE_CURRENCY: '',
   });
   const [isSettingsLoaded, setIsLoaded] = useState(false);
   useEffect(() => {
@@ -26,6 +30,8 @@ export default function useSettings() {
           HF_TOKEN: data.HF_TOKEN || '',
           TRAINING_FOLDER: data.TRAINING_FOLDER || '',
           DATASETS_FOLDER: data.DATASETS_FOLDER || '',
+          POWER_PRICE_PER_KWH: data.POWER_PRICE_PER_KWH || '',
+          POWER_PRICE_CURRENCY: data.POWER_PRICE_CURRENCY || '',
         });
         setIsLoaded(true);
       })

@@ -108,6 +108,44 @@ export default function Settings() {
                     placeholder="Enter datasets folder path"
                   />
                 </div>
+
+                <div>
+                  <label htmlFor="POWER_PRICE_PER_KWH" className="block text-sm font-medium mb-2">
+                    Electricity Price Per kWh
+                    <div className="text-gray-500 text-sm ml-1">
+                      Optional. If set, UI training jobs will estimate cost from sampled GPU power usage.
+                    </div>
+                  </label>
+                  <input
+                    type="number"
+                    step="0.0001"
+                    min="0"
+                    id="POWER_PRICE_PER_KWH"
+                    name="POWER_PRICE_PER_KWH"
+                    value={settings.POWER_PRICE_PER_KWH}
+                    onChange={handleChange}
+                    className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-gray-600 focus:border-transparent"
+                    placeholder="0.30"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="POWER_PRICE_CURRENCY" className="block text-sm font-medium mb-2">
+                    Electricity Currency
+                    <div className="text-gray-500 text-sm ml-1">
+                      Optional. For example: USD, EUR, GBP.
+                    </div>
+                  </label>
+                  <input
+                    type="text"
+                    id="POWER_PRICE_CURRENCY"
+                    name="POWER_PRICE_CURRENCY"
+                    value={settings.POWER_PRICE_CURRENCY}
+                    onChange={handleChange}
+                    className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-gray-600 focus:border-transparent"
+                    placeholder="USD"
+                  />
+                </div>
               </div>
             </div>
           </div>

@@ -8,6 +8,7 @@ from typing import Literal, Optional
 import threading
 import time
 import signal
+from toolkit.power_usage import PowerUsageTracker
 
 AITK_Status = Literal["running", "stopped", "error", "completed"]
 
@@ -37,7 +38,14 @@ class DiffusionTrainer(SDTrainer):
             # Initialize the status
             self._run_async_operation(self._update_status("running", "Starting"))
             self._stop_watcher_started = False
+            self.power_usage_tracker = PowerUsageTracker(
+                save_root=self.save_root,
+                sqlite_db_path=self.sqlite_db_path,
+            )
+            self.power_usage_tracker.start()
             # self.start_stop_watcher(interval_sec=2.0)
+        else:
+            self.power_usage_tracker = None
     
     def start_stop_watcher(self, interval_sec: float = 5.0):
         """
@@ -252,6 +260,12 @@ class DiffusionTrainer(SDTrainer):
         super(DiffusionTrainer, self).on_error(e)
         if self.is_ui_trainer:
             try:
+                if self.power_usage_tracker is not None:
+                    is_stop_request = self.is_stopping or isinstance(e, KeyboardInterrupt) or self.should_stop()
+                    final_status = "stopped" if is_stop_request else "error"
+                    if "queue" in str(e).lower():
+                        final_status = "queued"
+                    self.power_usage_tracker.stop(final_status)
                 if self.accelerator.is_main_process and not self.is_stopping:
                     self.update_status("error", str(e))
                 self.update_db_key("step", self.last_save_step)
@@ -277,6 +291,8 @@ class DiffusionTrainer(SDTrainer):
     def done_hook(self):
         super(DiffusionTrainer, self).done_hook()
         if self.is_ui_trainer:
+            if self.power_usage_tracker is not None:
+                self.power_usage_tracker.stop("completed")
             self.update_status("completed", "Training completed")
             # Wait for all async operations to finish before shutting down
             asyncio.run(self.wait_for_all_async())
