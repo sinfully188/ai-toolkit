@@ -7,6 +7,7 @@ import shutil
 from collections import OrderedDict
 import os
 import re
+import time
 import traceback
 from typing import Union, List, Optional
 
@@ -76,6 +77,7 @@ from toolkit.basic import flush
 
 
 class BaseSDTrainProcess(BaseTrainProcess):
+    AUTOSAVE_PREFIX = 'autosave-'
 
     def __init__(self, process_id: int, job, config: OrderedDict, custom_pipeline=None):
         super().__init__(process_id, job, config)
@@ -261,6 +263,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.current_boundary_index = 0
         self.steps_this_boundary = 0
         self.num_consecutive_oom = 0
+        self.resume_save_prefix = ''
+        self.last_timed_save_time = time.time()
 
     def post_process_generate_image_config_list(self, generate_image_config_list: List[GenerateImageConfig]):
         # override in subclass
@@ -401,6 +405,214 @@ class BaseSDTrainProcess(BaseTrainProcess):
         })
         return info
 
+    def _is_autosave_enabled(self):
+        interval_minutes = getattr(self.save_config, 'autosave_every_minutes', 0)
+        return interval_minutes is not None and interval_minutes > 0
+
+    def _should_run_autosave(self):
+        if not self.accelerator.is_main_process or not self._is_autosave_enabled():
+            return False
+        interval_seconds = float(self.save_config.autosave_every_minutes) * 60.0
+        return (time.time() - self.last_timed_save_time) >= interval_seconds
+
+    def _get_save_prefix_from_path(self, path):
+        if path is None:
+            return ''
+        name = os.path.basename(os.path.normpath(path))
+        if name.startswith(self.AUTOSAVE_PREFIX):
+            return self.AUTOSAVE_PREFIX
+        return ''
+
+    def _normalize_save_name(self, path):
+        name = os.path.basename(os.path.normpath(path))
+        if name.startswith(self.AUTOSAVE_PREFIX):
+            return name[len(self.AUTOSAVE_PREFIX):]
+        return name
+
+    def _make_output_path(self, filename, save_prefix=''):
+        return os.path.join(self.save_root, f'{save_prefix}{filename}')
+
+    def _remove_path(self, path):
+        if not os.path.exists(path) and not os.path.islink(path):
+            return
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+
+    def _get_related_temp_paths(self, final_path, temp_path):
+        root, ext = os.path.splitext(final_path)
+        if not ext:
+            return []
+        temp_prefix = f'{root}.tmp'
+        related_paths = []
+        for candidate in glob.glob(f'{temp_prefix}*{ext}'):
+            if candidate == temp_path:
+                continue
+            suffix = candidate[len(temp_prefix):-len(ext)]
+            if suffix:
+                related_paths.append(candidate)
+        return related_paths
+
+    def _remove_temp_artifacts(self, final_path, temp_path):
+        self._remove_path(temp_path)
+        for candidate in self._get_related_temp_paths(final_path, temp_path):
+            self._remove_path(candidate)
+
+    def _replace_saved_path(self, temp_path, final_path):
+        if os.path.isdir(temp_path):
+            backup_path = f'{final_path}.bak'
+            self._remove_path(backup_path)
+            try:
+                if os.path.exists(final_path):
+                    os.rename(final_path, backup_path)
+                os.rename(temp_path, final_path)
+                self._remove_path(backup_path)
+            except Exception:
+                self._remove_path(temp_path)
+                if os.path.exists(backup_path) and not os.path.exists(final_path):
+                    os.rename(backup_path, final_path)
+                raise
+            return
+        if os.path.exists(temp_path) or os.path.islink(temp_path):
+            os.replace(temp_path, final_path)
+            return
+
+        related_temp_paths = self._get_related_temp_paths(final_path, temp_path)
+        if related_temp_paths:
+            root, ext = os.path.splitext(final_path)
+            temp_prefix = f'{root}.tmp'
+            for related_temp_path in related_temp_paths:
+                suffix = related_temp_path[len(temp_prefix):-len(ext)]
+                related_final_path = f'{root}{suffix}{ext}'
+                os.replace(related_temp_path, related_final_path)
+            return
+        os.replace(temp_path, final_path)
+
+    def _save_path_atomically(self, final_path, save_fn):
+        root, ext = os.path.splitext(final_path)
+        if ext:
+            temp_path = f'{root}.tmp{ext}'
+        else:
+            temp_path = f'{final_path}.tmp'
+        self._remove_temp_artifacts(final_path, temp_path)
+        try:
+            save_fn(temp_path)
+            self._replace_saved_path(temp_path, final_path)
+        except Exception:
+            self._remove_temp_artifacts(final_path, temp_path)
+            raise
+        return final_path
+
+    def _write_yaml_atomic(self, data, final_path):
+        def write_yaml(temp_path):
+            with open(temp_path, 'w') as f:
+                yaml.dump(data, f)
+        return self._save_path_atomically(final_path, write_yaml)
+
+    def _write_json_atomic(self, data, final_path):
+        def write_json(temp_path):
+            with open(temp_path, 'w') as f:
+                json.dump(data, f, indent=4)
+        return self._save_path_atomically(final_path, write_json)
+
+    def _write_torch_atomic(self, data, final_path):
+        return self._save_path_atomically(final_path, lambda temp_path: torch.save(data, temp_path))
+
+    def _get_resume_artifact_candidates(self, filename):
+        candidates = []
+        prefixes = []
+        if self.resume_save_prefix:
+            prefixes.append(self.resume_save_prefix)
+        prefixes.append('')
+        for prefix in prefixes:
+            candidate = self._make_output_path(filename, prefix)
+            if candidate not in candidates:
+                candidates.append(candidate)
+        return candidates
+
+    def _save_resume_training_state(self, save_prefix=''):
+        training_state = {
+            'step_num': self.step_num,
+            'start_step': self.start_step,
+            'epoch_num': self.epoch_num,
+            'grad_accumulation_step': self.grad_accumulation_step,
+            'python_random_state': random.getstate(),
+            'numpy_random_state': np.random.get_state(),
+            'torch_random_state': torch.get_rng_state(),
+            'torch_cuda_random_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        }
+        training_state_path = self._make_output_path('training_state.pt', save_prefix)
+        self._write_torch_atomic(training_state, training_state_path)
+
+    def _load_resume_training_state(self):
+        for training_state_path in self._get_resume_artifact_candidates('training_state.pt'):
+            if not os.path.exists(training_state_path):
+                continue
+            try:
+                training_state = torch.load(training_state_path, map_location='cpu', weights_only=False)
+                if self.train_config.start_step is None and 'step_num' in training_state:
+                    self.step_num = training_state['step_num']
+                    self.start_step = self.step_num
+                self.epoch_num = training_state.get('epoch_num', self.epoch_num)
+                self.grad_accumulation_step = training_state.get('grad_accumulation_step', self.grad_accumulation_step)
+                if 'python_random_state' in training_state:
+                    random.setstate(training_state['python_random_state'])
+                if 'numpy_random_state' in training_state:
+                    np.random.set_state(training_state['numpy_random_state'])
+                if 'torch_random_state' in training_state:
+                    torch.set_rng_state(training_state['torch_random_state'])
+                cuda_state = training_state.get('torch_cuda_random_state', None)
+                if torch.cuda.is_available() and cuda_state is not None:
+                    torch.cuda.set_rng_state_all(cuda_state)
+                print_acc(f'Loaded training state from {training_state_path}')
+            except Exception as e:
+                print_acc(f'Failed to load training state from {training_state_path}')
+                print_acc(e)
+            break
+
+    def _load_resume_scheduler_state(self):
+        if self.lr_scheduler is None:
+            return
+        for scheduler_state_path in self._get_resume_artifact_candidates('lr_scheduler.pt'):
+            if not os.path.exists(scheduler_state_path):
+                continue
+            try:
+                print_acc(f'Loading lr scheduler state from {scheduler_state_path}')
+                scheduler_state = torch.load(scheduler_state_path, map_location='cpu', weights_only=False)
+                self.lr_scheduler.load_state_dict(scheduler_state)
+            except Exception as e:
+                print_acc(f'Failed to load lr scheduler state from {scheduler_state_path}')
+                print_acc(e)
+            break
+
+    def _clear_autosave_artifacts(self):
+        if not os.path.exists(self.save_root):
+            return
+        for pattern in [
+            f'{self.AUTOSAVE_PREFIX}*',
+            f'{self.AUTOSAVE_PREFIX}*.tmp',
+            f'{self.AUTOSAVE_PREFIX}*.bak',
+        ]:
+            for item in glob.glob(os.path.join(self.save_root, pattern)):
+                self._remove_path(item)
+
+    def _clear_legacy_autosave_step_artifacts(self):
+        if not os.path.exists(self.save_root):
+            return
+        legacy_autosave_pattern = re.compile(
+            rf'^{re.escape(self.AUTOSAVE_PREFIX)}.+_\d{{9}}(?:$|[._])'
+        )
+        for pattern in [
+            f'{self.AUTOSAVE_PREFIX}*',
+            f'{self.AUTOSAVE_PREFIX}*.tmp',
+            f'{self.AUTOSAVE_PREFIX}*.bak',
+        ]:
+            for item in glob.glob(os.path.join(self.save_root, pattern)):
+                name = os.path.basename(os.path.normpath(item))
+                if legacy_autosave_pattern.match(name):
+                    self._remove_path(item)
+
     def clean_up_saves(self):
         if not self.accelerator.is_main_process:
             return
@@ -488,10 +700,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
     def end_step_hook(self):
         pass
 
-    def save(self, step=None):
+    def save(self, step=None, save_prefix=''):
         if not self.accelerator.is_main_process:
             return
         flush()
+        is_autosave = save_prefix == self.AUTOSAVE_PREFIX
         if self.ema is not None:
             # always save params as ema
             self.ema.eval()
@@ -502,12 +715,14 @@ class BaseSDTrainProcess(BaseTrainProcess):
         step_num = ''
         if step is not None:
             self.last_save_step = step
-            # zeropad 9 digits
-            step_num = f"_{str(step).zfill(9)}"
+            if not is_autosave:
+                # timed autosaves should overwrite a stable slot instead of accumulating per-step artifacts
+                step_num = f"_{str(step).zfill(9)}"
 
         self.update_training_metadata()
         filename = f'{self.job.name}{step_num}.safetensors'
-        file_path = os.path.join(self.save_root, filename)
+        file_path = self._make_output_path(filename, save_prefix)
+        primary_save_path = file_path
 
         save_meta = copy.deepcopy(self.meta)
         # get extra meta
@@ -527,25 +742,31 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     lora_name += '_LoRA'
 
                 filename = f'{lora_name}{step_num}.safetensors'
-                file_path = os.path.join(self.save_root, filename)
+                file_path = self._make_output_path(filename, save_prefix)
+                primary_save_path = file_path
                 prev_multiplier = self.network.multiplier
                 self.network.multiplier = 1.0
 
                 # if we are doing embedding training as well, add that
                 embedding_dict = self.embedding.state_dict() if self.embedding else None
-                self.network.save_weights(
-                    file_path,
-                    dtype=get_torch_dtype(self.save_config.dtype),
-                    metadata=save_meta,
-                    extra_state_dict=embedding_dict
-                )
-                self.network.multiplier = prev_multiplier
+                try:
+                    self._save_path_atomically(
+                        file_path,
+                        lambda temp_path: self.network.save_weights(
+                            temp_path,
+                            dtype=get_torch_dtype(self.save_config.dtype),
+                            metadata=save_meta,
+                            extra_state_dict=embedding_dict
+                        )
+                    )
+                finally:
+                    self.network.multiplier = prev_multiplier
                 # if we have an embedding as well, pair it with the network
 
             # even if added to lora, still save the trigger version
             if self.embedding is not None:
                 emb_filename = f'{self.embed_config.trigger}{step_num}.safetensors'
-                emb_file_path = os.path.join(self.save_root, emb_filename)
+                emb_file_path = self._make_output_path(emb_filename, save_prefix)
                 # for combo, above will get it
                 # set current step
                 self.embedding.step = self.step_num
@@ -553,19 +774,25 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 if self.embed_config.save_format == "pt":
                     # replace extension
                     emb_file_path = os.path.splitext(emb_file_path)[0] + ".pt"
-                self.embedding.save(emb_file_path)
+                if self.network is None:
+                    primary_save_path = emb_file_path
+                self._save_path_atomically(emb_file_path, lambda temp_path: self.embedding.save(temp_path))
             
             if self.decorator is not None:
                 dec_filename = f'{self.job.name}{step_num}.safetensors'
-                dec_file_path = os.path.join(self.save_root, dec_filename)
+                dec_file_path = self._make_output_path(dec_filename, save_prefix)
+                primary_save_path = dec_file_path
                 decorator_state_dict = self.decorator.state_dict()
                 for key, value in decorator_state_dict.items():
                     if isinstance(value, torch.Tensor):
                         decorator_state_dict[key] = value.clone().to('cpu', dtype=get_torch_dtype(self.save_config.dtype))
-                save_file(
-                    decorator_state_dict,
+                self._save_path_atomically(
                     dec_file_path,
-                    metadata=save_meta,
+                    lambda temp_path: save_file(
+                        decorator_state_dict,
+                        temp_path,
+                        metadata=save_meta,
+                    )
                 )
 
             if self.adapter is not None and self.adapter_config.train:
@@ -584,45 +811,49 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         adapter_name += '_adapter'
 
                 filename = f'{adapter_name}{step_num}.safetensors'
-                file_path = os.path.join(self.save_root, filename)
+                file_path = self._make_output_path(filename, save_prefix)
+                primary_save_path = file_path
                 # save adapter
                 state_dict = self.adapter.state_dict()
                 if self.adapter_config.type == 't2i':
-                    save_t2i_from_diffusers(
-                        state_dict,
-                        output_file=file_path,
-                        meta=save_meta,
-                        dtype=get_torch_dtype(self.save_config.dtype)
+                    self._save_path_atomically(
+                        file_path,
+                        lambda temp_path: save_t2i_from_diffusers(
+                            state_dict,
+                            output_file=temp_path,
+                            meta=save_meta,
+                            dtype=get_torch_dtype(self.save_config.dtype)
+                        )
                     )
                 elif self.adapter_config.type == 'control_net':
                     # save in diffusers format
                     name_or_path = file_path.replace('.safetensors', '')
-                    # move it to the new dtype and cpu
+                    primary_save_path = name_or_path
                     orig_device = self.adapter.device
                     orig_dtype = self.adapter.dtype
-                    self.adapter = self.adapter.to(torch.device('cpu'), dtype=get_torch_dtype(self.save_config.dtype))
-                    self.adapter.save_pretrained(
-                        name_or_path,
-                        dtype=get_torch_dtype(self.save_config.dtype),
-                        safe_serialization=True
-                    )
-                    meta_path = os.path.join(name_or_path, 'aitk_meta.yaml')
-                    with open(meta_path, 'w') as f:
-                        yaml.dump(self.meta, f)
-                    # move it back
-                    self.adapter = self.adapter.to(orig_device, dtype=orig_dtype)
+                    try:
+                        self.adapter = self.adapter.to(torch.device('cpu'), dtype=get_torch_dtype(self.save_config.dtype))
+                        self._save_path_atomically(
+                            name_or_path,
+                            lambda temp_path: self._save_controlnet_artifacts(temp_path)
+                        )
+                    finally:
+                        self.adapter = self.adapter.to(orig_device, dtype=orig_dtype)
                 else:
                     direct_save = False
                     if self.adapter_config.train_only_image_encoder:
                         direct_save = True
                     elif isinstance(self.adapter, CustomAdapter):
                         direct_save = self.adapter.do_direct_save
-                    save_ip_adapter_from_diffusers(
-                        state_dict,
-                        output_file=file_path,
-                        meta=save_meta,
-                        dtype=get_torch_dtype(self.save_config.dtype),
-                        direct_save=direct_save
+                    self._save_path_atomically(
+                        file_path,
+                        lambda temp_path: save_ip_adapter_from_diffusers(
+                            state_dict,
+                            output_file=temp_path,
+                            meta=save_meta,
+                            dtype=get_torch_dtype(self.save_config.dtype),
+                            direct_save=direct_save
+                        )
                     )
         else:
             if self.network is not None and self.train_config.merge_network_on_save:
@@ -644,22 +875,30 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 file_path = file_path.replace('.safetensors', '')
                 # convert it back to normal object
                 save_meta = parse_metadata_from_safetensors(save_meta)
+                primary_save_path = file_path
 
             if self.sd.refiner_unet and self.train_config.train_refiner:
                 # save refiner
                 refiner_name = self.job.name + '_refiner'
                 filename = f'{refiner_name}{step_num}.safetensors'
-                file_path = os.path.join(self.save_root, filename)
-                self.sd.save_refiner(
+                file_path = self._make_output_path(filename, save_prefix)
+                self._save_path_atomically(
                     file_path,
-                    save_meta,
-                    get_torch_dtype(self.save_config.dtype)
+                    lambda temp_path: self.sd.save_refiner(
+                        temp_path,
+                        save_meta,
+                        get_torch_dtype(self.save_config.dtype)
+                    )
                 )
             if self.train_config.train_unet or self.train_config.train_text_encoder:
-                self.sd.save(
+                primary_save_path = file_path
+                self._save_path_atomically(
                     file_path,
-                    save_meta,
-                    get_torch_dtype(self.save_config.dtype)
+                    lambda temp_path: self.sd.save(
+                        temp_path,
+                        save_meta,
+                        get_torch_dtype(self.save_config.dtype)
+                    )
                 )
 
         # save learnable params as json if we have thim
@@ -670,33 +909,56 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 'scale': self.snr_gos.scale.item(),
                 'gamma': self.snr_gos.gamma.item(),
             }
-            path_to_save = file_path = os.path.join(self.save_root, 'learnable_snr.json')
-            with open(path_to_save, 'w') as f:
-                json.dump(json_data, f, indent=4)
+            path_to_save = self._make_output_path('learnable_snr.json', save_prefix)
+            self._write_json_atomic(json_data, path_to_save)
         
-        print_acc(f"Saved checkpoint to {file_path}")
+        print_acc(f"Saved checkpoint to {primary_save_path}")
 
         # save optimizer
         if self.optimizer is not None:
             try:
-                filename = f'optimizer.pt'
-                file_path = os.path.join(self.save_root, filename)
+                filename = 'optimizer.pt'
+                file_path = self._make_output_path(filename, save_prefix)
                 try:
                     state_dict = unwrap_model(self.optimizer).state_dict()
                 except Exception as e:
                     state_dict = self.optimizer.state_dict()
-                torch.save(state_dict, file_path)
+                self._write_torch_atomic(state_dict, file_path)
                 print_acc(f"Saved optimizer to {file_path}")
             except Exception as e:
                 print_acc(e)
                 print_acc("Could not save optimizer")
 
-        self.clean_up_saves()
-        self.post_save_hook(file_path)
+        if is_autosave:
+            if self.lr_scheduler is not None:
+                self._write_torch_atomic(
+                    self.lr_scheduler.state_dict(),
+                    self._make_output_path('lr_scheduler.pt', save_prefix)
+                )
+            self._save_resume_training_state(save_prefix)
+            self._write_yaml_atomic(self.job.raw_config, self._make_output_path('config.yaml', save_prefix))
+            self._clear_legacy_autosave_step_artifacts()
+
+        if not is_autosave:
+            self.clean_up_saves()
+            self._clear_autosave_artifacts()
+            self.post_save_hook(primary_save_path)
+
+        self.last_timed_save_time = time.time()
 
         if self.ema is not None:
             self.ema.train()
         flush()
+
+    def _save_controlnet_artifacts(self, output_path):
+        self.adapter.save_pretrained(
+            output_path,
+            dtype=get_torch_dtype(self.save_config.dtype),
+            safe_serialization=True
+        )
+        meta_path = os.path.join(output_path, 'aitk_meta.yaml')
+        with open(meta_path, 'w') as f:
+            yaml.dump(self.meta, f)
 
     # Called before the model is loaded
     def hook_before_model_load(self):
@@ -802,11 +1064,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
         latest_path = None
         if os.path.exists(self.save_root):
             # Define patterns for both files and directories
-            patterns = [
-                f"{name}*{post}.safetensors",
-                f"{name}*{post}.pt",
-                f"{name}*{post}"
-            ]
+            patterns = []
+            for save_name in [name, f'{self.AUTOSAVE_PREFIX}{name}']:
+                patterns.extend([
+                    f"{save_name}*{post}.safetensors",
+                    f"{save_name}*{post}.pt",
+                    f"{save_name}*{post}"
+                ])
             # Search for both files and directories
             paths = []
             for pattern in patterns:
@@ -817,13 +1081,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 paths = [p for p in paths if os.path.exists(p)]
                 # remove false positives
                 if '_LoRA' not in name:
-                    paths = [p for p in paths if '_LoRA' not in p]
+                    paths = [p for p in paths if '_LoRA' not in self._normalize_save_name(p)]
                 if '_refiner' not in name:
-                    paths = [p for p in paths if '_refiner' not in p]
+                    paths = [p for p in paths if '_refiner' not in self._normalize_save_name(p)]
                 if '_t2i' not in name:
-                    paths = [p for p in paths if '_t2i' not in p]
+                    paths = [p for p in paths if '_t2i' not in self._normalize_save_name(p)]
                 if '_cn' not in name:
-                    paths = [p for p in paths if '_cn' not in p]
+                    paths = [p for p in paths if '_cn' not in self._normalize_save_name(p)]
 
                 if len(paths) > 0:
                     latest_path = max(paths, key=os.path.getctime)
@@ -845,6 +1109,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if path is not None and self.network_config is not None and path == self.network_config.pretrained_lora_path:
             # dont load metadata from pretrained lora
             return
+        if path is not None and os.path.dirname(os.path.abspath(path)) == os.path.abspath(self.save_root):
+            self.resume_save_prefix = self._get_save_prefix_from_path(path)
         meta = None
         # if path is folder, then it is diffusers
         if os.path.isdir(path):
@@ -1717,8 +1983,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 self.sd.noise_scheduler, device=self.device_torch
             )
             # check to see if previous settings exist
-            path_to_load = os.path.join(self.save_root, 'learnable_snr.json')
-            if os.path.exists(path_to_load):
+            path_to_load = None
+            for candidate_path in self._get_resume_artifact_candidates('learnable_snr.json'):
+                if os.path.exists(candidate_path):
+                    path_to_load = candidate_path
+                    break
+            if path_to_load is not None:
                 with open(path_to_load, 'r') as f:
                     json_data = json.load(f)
                     if 'offset' in json_data:
@@ -1981,9 +2251,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
             self.optimizer.enable_paramiter_swapping(self.train_config.paramiter_swapping_factor)
 
         # check if it exists
-        optimizer_state_filename = f'optimizer.pt'
-        optimizer_state_file_path = os.path.join(self.save_root, optimizer_state_filename)
-        if os.path.exists(optimizer_state_file_path):
+        optimizer_state_file_path = None
+        for candidate_path in self._get_resume_artifact_candidates('optimizer.pt'):
+            if os.path.exists(candidate_path):
+                optimizer_state_file_path = candidate_path
+                break
+        if optimizer_state_file_path is not None:
             # try to load
             # previous param groups
             # previous_params = copy.deepcopy(optimizer.param_groups)
@@ -2031,6 +2304,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
             **lr_scheduler_params
         )
         self.lr_scheduler = lr_scheduler
+        self._load_resume_scheduler_state()
+        self._load_resume_training_state()
 
         ### HOOk ###
         self.before_dataset_load()
@@ -2286,6 +2561,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 if self.step_num != self.start_step:
                     if is_sample_step or is_save_step:
                         self.accelerator.wait_for_everyone()
+                    do_autosave = self._should_run_autosave() and not is_save_step
                         
                     if is_save_step:
                         self.accelerator
@@ -2301,6 +2577,25 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         flush_next = True
                         if self.progress_bar is not None:
                             self.progress_bar.unpause()
+
+                    if do_autosave:
+                        if self.progress_bar is not None:
+                            self.progress_bar.pause()
+                        try:
+                            print_acc(f"\nAutosaving at step {self.step_num}")
+                            self.save(self.step_num, save_prefix=self.AUTOSAVE_PREFIX)
+                            self.ensure_params_requires_grad()
+                            optimizer.zero_grad()
+                            flush()
+                            flush_next = True
+                        except Exception as e:
+                            print_acc(f"Autosave failed at step {self.step_num}")
+                            print_acc(e)
+                            self.last_timed_save_time = time.time()
+                            traceback.print_exc()
+                        finally:
+                            if self.progress_bar is not None:
+                                self.progress_bar.unpause()
                             
                     if is_sample_step:
                         if self.progress_bar is not None:

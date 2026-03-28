@@ -79,6 +79,7 @@ config:
       save:
         dtype: float16 # precision to save. I recommend float16
         save_every: 50 # save every this many steps
+        autosave_every_minutes: 15 # overwrite autosave-* resume files every N minutes, set to 0 to disable
         # this will remove step counts more than this number
         # allows you to save more often in case of a crash without filling up your drive
         max_step_saves_to_keep: 2

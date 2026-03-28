@@ -20,6 +20,7 @@ config:
       save:
         dtype: float16 # precision to save
         save_every: 250 # save every this many steps
+        autosave_every_minutes: 15 # overwrite autosave-* resume files every N minutes, set to 0 to disable
         max_step_saves_to_keep: 4 # how many intermittent saves to keep
         push_to_hub: false #change this to True to push your trained model to Hugging Face.
         # You can either set up a HF_TOKEN env variable or you'll be prompted to log-in         

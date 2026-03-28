@@ -22,6 +22,7 @@ else:
 class SaveConfig:
     def __init__(self, **kwargs):
         self.save_every: int = kwargs.get('save_every', 1000)
+        self.autosave_every_minutes: float = kwargs.get('autosave_every_minutes', 15)
         self.dtype: str = kwargs.get('dtype', 'float16')
         self.max_step_saves_to_keep: int = kwargs.get('max_step_saves_to_keep', 5)
         self.save_format: SaveFormat = kwargs.get('save_format', 'safetensors')
@@ -1344,6 +1345,24 @@ def validate_configs(
     save_config: SaveConfig,
     dataset_configs: List[DatasetConfig]
 ):
+    if model_config.arch == 'ltx2':
+        invalid_num_frames = []
+        for dataset in dataset_configs:
+            if dataset.num_frames > 1 and (dataset.num_frames - 1) % 8 != 0:
+                lower_valid = ((dataset.num_frames - 1) // 8) * 8 + 1
+                upper_valid = lower_valid + 8
+                invalid_num_frames.append(
+                    f"{dataset.folder_path}: num_frames={dataset.num_frames} (use {lower_valid} or {upper_valid})"
+                )
+
+        if invalid_num_frames:
+            invalid_num_frames_str = "\n - ".join(invalid_num_frames)
+            raise ValueError(
+                "LTX2 training datasets require num_frames values of 1 or 1 mod 8 "
+                "(for example 9, 17, 25, 33, 49, 57, 73, 89, 97, 121).\n - "
+                f"{invalid_num_frames_str}"
+            )
+
     if model_config.is_flux:
         if save_config.save_format != 'diffusers':
             # make it diffusers

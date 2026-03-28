@@ -1,5 +1,7 @@
 import os
 import sys
+import sqlite3
+from typing import Union, OrderedDict
 from dotenv import load_dotenv
 # Load the .env file if it exists
 load_dotenv()
@@ -36,6 +38,7 @@ if seed is not None:
 
 import argparse
 from toolkit.job import get_job
+from toolkit.config import get_config
 from toolkit.accelerator import get_accelerator
 from toolkit.print import print_acc, setup_log_to_file
 
@@ -58,6 +61,34 @@ def print_end_message(jobs_completed, jobs_failed):
     if len(failure_string) > 0:
         print_acc(f"[run.py]  - {failure_string}")
     print_acc("[run.py] ========================================")
+
+
+def mark_ui_job_error(config_file, name, error_message):
+    job_id = os.environ.get('AITK_JOB_ID', None)
+    if job_id is None:
+        return
+
+    try:
+        config = get_config(config_file, name)
+        process_configs = config.get('config', {}).get('process', [])
+        sqlite_db_path = None
+        for process_config in process_configs:
+            sqlite_db_path = process_config.get('sqlite_db_path', None)
+            if sqlite_db_path:
+                break
+
+        if sqlite_db_path is None or not os.path.exists(sqlite_db_path):
+            return
+
+        with sqlite3.connect(sqlite_db_path, timeout=10.0) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE Job SET status = ?, info = ? WHERE id = ?",
+                ('error', str(error_message), job_id.strip())
+            )
+            conn.commit()
+    except Exception as db_error:
+        print_acc(f"[run.py] Failed to mark UI job as error: {db_error}")
 
 
 def main():
@@ -144,6 +175,8 @@ def main():
                 if 'job' in locals() and hasattr(job, 'process') and len(job.process) > 0:
                     print_acc(f"[run.py] Calling on_error handler...")
                     job.process[0].on_error(e)
+                else:
+                    mark_ui_job_error(config_file, args.name, e)
             except Exception as e2:
                 print_acc(f"[run.py] Error running on_error handler: {e2}")
             if not args.recover:

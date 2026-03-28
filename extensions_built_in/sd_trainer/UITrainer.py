@@ -287,9 +287,9 @@ class UITrainer(SDTrainer):
         self.maybe_stop()
         self.update_status("running", "Training")
 
-    def save(self, step=None):
+    def save(self, step=None, save_prefix=''):
         self.maybe_stop()
         self.update_status("running", "Saving model")
-        super().save(step)
+        super().save(step, save_prefix=save_prefix)
         self.maybe_stop()
         self.update_status("running", "Training")
