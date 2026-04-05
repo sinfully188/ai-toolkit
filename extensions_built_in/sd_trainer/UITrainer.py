@@ -221,6 +221,9 @@ class UITrainer(SDTrainer):
             # Clear the task list after completion
             self._async_tasks.clear()
 
+    def _get_persisted_step(self):
+        return max(self.last_save_step, self.step_num, self.start_step)
+
     def on_error(self, e: Exception):
         super(UITrainer, self).on_error(e)
         if self.power_usage_tracker is not None:
@@ -231,7 +234,7 @@ class UITrainer(SDTrainer):
             self.power_usage_tracker.stop(final_status)
         if self.accelerator.is_main_process and not self.is_stopping:
             self.update_status("error", str(e))
-        self.update_db_key("step", self.last_save_step)
+        self.update_db_key("step", self._get_persisted_step())
         asyncio.run(self.wait_for_all_async())
         self.thread_pool.shutdown(wait=True)
 
