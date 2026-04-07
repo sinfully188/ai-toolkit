@@ -12,7 +12,7 @@ import { redirect } from 'next/navigation';
 import JobActionBar from '@/components/JobActionBar';
 import JobConfigViewer from '@/components/JobConfigViewer';
 import JobLossGraph from '@/components/JobLossGraph';
-import { Job } from '@prisma/client';
+import { JobWithPowerSummary } from '@/types';
 
 type PageKey = 'overview' | 'samples' | 'config' | 'loss_log';
 
@@ -20,8 +20,8 @@ interface Page {
   name: string;
   value: PageKey;
   icon: React.ComponentType<{ className?: string }>;
-  component: React.ComponentType<{ job: Job }>;
-  menuItem?: React.ComponentType<{ job?: Job | null }> | null;
+  component: React.ComponentType<{ job: JobWithPowerSummary }>;
+  menuItem?: React.ComponentType<{ job?: JobWithPowerSummary | null }> | null;
   mainCss?: string;
 }
 

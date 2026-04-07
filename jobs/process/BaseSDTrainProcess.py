@@ -74,6 +74,7 @@ import hashlib
 from toolkit.util.blended_blur_noise import get_blended_blur_noise
 from toolkit.util.get_model import get_model_class
 from toolkit.basic import flush
+from toolkit.power_usage import read_power_usage_summary
 
 
 class BaseSDTrainProcess(BaseTrainProcess):
@@ -2812,6 +2813,29 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         }
                     )
         dtype = "torch.bfloat16" if self.model_config.is_flux else "torch.float16"
+        power_summary = read_power_usage_summary(os.path.join(self.save_root, "power_log.db"))
+        power_section = ""
+        if power_summary is not None:
+            average_power_w = round(float(power_summary["average_power_w"]))
+            peak_power_w = round(float(power_summary["peak_power_w"]))
+            total_energy_kwh = float(power_summary["total_energy_wh"]) / 1000.0
+            estimated_cost = power_summary.get("estimated_cost")
+            currency = power_summary.get("currency") or ""
+
+            power_lines = [
+                "## Training power usage",
+                "",
+                f"- Average GPU power draw: {average_power_w} W",
+                f"- Peak GPU power draw: {peak_power_w} W",
+                f"- Estimated energy used: {total_energy_kwh:.3f} kWh",
+            ]
+
+            if estimated_cost is not None:
+                cost_prefix = f" {currency}" if currency else ""
+                power_lines.append(f"- Estimated power cost:{cost_prefix} {float(estimated_cost):.2f}".rstrip())
+
+            power_section = "\n".join(power_lines) + "\n\n"
+
         # Construct the README content
         readme_content = f"""---
 tags:
@@ -2853,5 +2877,5 @@ image.save("my_image.png")
 
 For more details, including weighting, merging and fusing LoRAs, check the [documentation on loading LoRAs in diffusers](https://huggingface.co/docs/diffusers/main/en/using-diffusers/loading_adapters)
 
-"""
+{power_section}"""
         return readme_content

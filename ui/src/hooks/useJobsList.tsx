@@ -1,11 +1,11 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Job } from '@prisma/client';
 import { apiClient } from '@/utils/api';
+import { JobWithPowerSummary } from '@/types';
 
 export default function useJobsList(onlyActive = false, reloadInterval: null | number = null) {
-  const [jobs, setJobs] = useState<Job[]>([]);
+  const [jobs, setJobs] = useState<JobWithPowerSummary[]>([]);
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
 
   const refreshJobs = () => {
@@ -20,7 +20,7 @@ export default function useJobsList(onlyActive = false, reloadInterval: null | n
           setStatus('error');
         } else {
           if (onlyActive) {
-            data.jobs = data.jobs.filter((job: Job) => ['running', 'queued', 'stopping'].includes(job.status));
+            data.jobs = data.jobs.filter((job: JobWithPowerSummary) => ['running', 'queued', 'stopping'].includes(job.status));
           }
           setJobs(data.jobs);
           setStatus('success');

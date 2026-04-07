@@ -19,6 +19,30 @@ if TYPE_CHECKING:
 else:
     EmptyLogger = None
 
+
+def normalize_windows_path(path_value):
+    if os.name != 'nt':
+        return path_value
+    if isinstance(path_value, list):
+        return [normalize_windows_path(item) for item in path_value]
+    if not isinstance(path_value, str):
+        return path_value
+    if path_value.strip() == '':
+        return path_value
+
+    if path_value.startswith('\\\\'):
+        return os.path.normpath(path_value.replace('/', '\\'))
+
+    drive, _ = os.path.splitdrive(path_value)
+    if drive:
+        return os.path.normpath(path_value)
+
+    if path_value.startswith('//') or path_value.startswith('/'):
+        unc_path = '\\\\' + path_value.lstrip('/\\').replace('/', '\\')
+        return os.path.normpath(unc_path)
+
+    return path_value
+
 class SaveConfig:
     def __init__(self, **kwargs):
         self.save_every: int = kwargs.get('save_every', 1000)
@@ -863,14 +887,14 @@ class DatasetConfig:
     def __init__(self, **kwargs):
         self.type = kwargs.get('type', 'image')  # sd, slider, reference
         # will be legacy
-        self.folder_path: str = kwargs.get('folder_path', None)
+        self.folder_path: str = normalize_windows_path(kwargs.get('folder_path', None))
         # can be json or folder path
-        self.dataset_path: str = kwargs.get('dataset_path', None)
+        self.dataset_path: str = normalize_windows_path(kwargs.get('dataset_path', None))
 
         self.default_caption: str = kwargs.get('default_caption', None)
         # trigger word for just this dataset
         self.trigger_word: str = kwargs.get('trigger_word', None)
-        random_triggers = kwargs.get('random_triggers', [])
+        random_triggers = normalize_windows_path(kwargs.get('random_triggers', []))
         # if they are a string, load them from a file
         if isinstance(random_triggers, str) and os.path.exists(random_triggers):
             with open(random_triggers, 'r') as f:
@@ -899,14 +923,14 @@ class DatasetConfig:
         self.flip_x: bool = kwargs.get('flip_x', False)
         self.flip_y: bool = kwargs.get('flip_y', False)
         self.augments: List[str] = kwargs.get('augments', [])
-        self.control_path: Union[str,List[str]] = kwargs.get('control_path', None)  # depth maps, etc
+        self.control_path: Union[str,List[str]] = normalize_windows_path(kwargs.get('control_path', None))  # depth maps, etc
         if self.control_path == '':
             self.control_path = None
         
         # handle multi control inputs from the ui. It is just easier to handle it here for a cleaner ui experience
-        control_path_1 = kwargs.get('control_path_1', None)
-        control_path_2 = kwargs.get('control_path_2', None)
-        control_path_3 = kwargs.get('control_path_3', None)
+        control_path_1 = normalize_windows_path(kwargs.get('control_path_1', None))
+        control_path_2 = normalize_windows_path(kwargs.get('control_path_2', None))
+        control_path_3 = normalize_windows_path(kwargs.get('control_path_3', None))
         
         if any([control_path_1, control_path_2, control_path_3]):
             control_paths = []
@@ -922,14 +946,16 @@ class DatasetConfig:
         self.control_transparent_color: List[int] = kwargs.get('control_transparent_color', [0, 0, 0])
         # inpaint images should be webp/png images with alpha channel. The alpha 0 (invisible) section will
         # be the part conditioned to be inpainted. The alpha 1 (visible) section will be the part that is ignored
-        self.inpaint_path: Union[str,List[str]] = kwargs.get('inpaint_path', None)
+        self.inpaint_path: Union[str,List[str]] = normalize_windows_path(kwargs.get('inpaint_path', None))
         # instead of cropping ot match image, it will serve the full size control image (clip images ie for ip adapters)
         self.full_size_control_images: bool = kwargs.get('full_size_control_images', True)
         self.alpha_mask: bool = kwargs.get('alpha_mask', False)  # if true, will use alpha channel as mask
-        self.mask_path: str = kwargs.get('mask_path',
-                                         None)  # focus mask (black and white. White has higher loss than black)
-        self.unconditional_path: str = kwargs.get('unconditional_path',
-                                                  None)  # path where matching unconditional images are located
+        self.mask_path: str = normalize_windows_path(
+            kwargs.get('mask_path', None)
+        )  # focus mask (black and white. White has higher loss than black)
+        self.unconditional_path: str = normalize_windows_path(
+            kwargs.get('unconditional_path', None)
+        )  # path where matching unconditional images are located
         self.invert_mask: bool = kwargs.get('invert_mask', False)  # invert mask
         self.mask_min_value: float = kwargs.get('mask_min_value', 0.0)  # min value for . 0 - 1
         self.poi: Union[str, None] = kwargs.get('poi',
@@ -965,7 +991,7 @@ class DatasetConfig:
         self.guidance_type: GuidanceType = kwargs.get('guidance_type', 'targeted')
 
         # ip adapter / reference dataset
-        self.clip_image_path: str = kwargs.get('clip_image_path', None)  # depth maps, etc
+        self.clip_image_path: str = normalize_windows_path(kwargs.get('clip_image_path', None))  # depth maps, etc
         # get the clip image randomly from the same folder as the image. Useful for folder grouped pairs.
         self.clip_image_from_same_folder: bool = kwargs.get('clip_image_from_same_folder', False)
         self.clip_image_augmentations: List[dict] = kwargs.get('clip_image_augmentations', None)

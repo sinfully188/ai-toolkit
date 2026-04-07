@@ -2,9 +2,9 @@ import { useMemo } from 'react';
 import useJobsList from '@/hooks/useJobsList';
 import Link from 'next/link';
 import UniversalTable, { TableColumn } from '@/components/UniversalTable';
-import { GpuInfo, JobConfig } from '@/types';
+import { GpuInfo, JobConfig, JobWithPowerSummary, PowerUsageSummary } from '@/types';
 import JobActionBar from './JobActionBar';
-import { Job, Queue } from '@prisma/client';
+import { Queue } from '@prisma/client';
 import useQueueList from '@/hooks/useQueueList';
 import classNames from 'classnames';
 import { startQueue, stopQueue } from '@/utils/queue';
@@ -14,6 +14,22 @@ import useGPUInfo from '@/hooks/useGPUInfo';
 interface JobsTableProps {
   autoStartQueue?: boolean;
   onlyActive?: boolean;
+}
+
+function formatPowerSummary(summary?: PowerUsageSummary | null) {
+  if (!summary || summary.sampleCount <= 0) {
+    return null;
+  }
+
+  const averagePower = Math.round(summary.averagePowerW);
+  const peakPower = Math.round(summary.peakPowerW);
+  const energyKwh = summary.totalEnergyWh / 1000;
+  const costText =
+    summary.estimatedCost != null
+      ? ` | Cost ${summary.currency ? `${summary.currency} ` : ''}${summary.estimatedCost.toFixed(2)}`
+      : '';
+
+  return `Avg ${averagePower} W | Peak ${peakPower} W | ${energyKwh.toFixed(2)} kWh${costText}`;
 }
 
 export default function JobsTable({ onlyActive = false }: JobsTableProps) {
@@ -31,12 +47,17 @@ export default function JobsTable({ onlyActive = false }: JobsTableProps) {
       title: 'Name',
       key: 'name',
       render: row => (
-        <Link href={`/jobs/${row.id}`} className="font-medium whitespace-nowrap">
-          {['running', 'stopping'].includes(row.status) ? (
-            <CgSpinner className="inline animate-spin mr-2 text-blue-400" />
+        <div>
+          <Link href={`/jobs/${row.id}`} className="font-medium whitespace-nowrap">
+            {['running', 'stopping'].includes(row.status) ? (
+              <CgSpinner className="inline animate-spin mr-2 text-blue-400" />
+            ) : null}
+            {row.name}
+          </Link>
+          {formatPowerSummary(row.powerSummary) ? (
+            <div className="text-xs text-gray-400 mt-1">{formatPowerSummary(row.powerSummary)}</div>
           ) : null}
-          {row.name}
-        </Link>
+        </div>
       ),
     },
     {
@@ -95,7 +116,7 @@ export default function JobsTable({ onlyActive = false }: JobsTableProps) {
   const jobsDict = useMemo(() => {
     if (!isGPUInfoLoaded) return {};
     if (jobs.length === 0) return {};
-    let jd: { [key: string]: { name: string; jobs: Job[] } } = {};
+    let jd: { [key: string]: { name: string; jobs: JobWithPowerSummary[] } } = {};
     gpuList.forEach(gpu => {
       jd[`${gpu.index}`] = { name: `${gpu.name}`, jobs: [] };
     });

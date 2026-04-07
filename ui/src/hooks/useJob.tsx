@@ -1,11 +1,11 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Job } from '@prisma/client';
 import { apiClient } from '@/utils/api';
+import { JobWithPowerSummary } from '@/types';
 
 export default function useJob(jobID: string, reloadInterval: null | number = null) {
-  const [job, setJob] = useState<Job | null>(null);
+  const [job, setJob] = useState<JobWithPowerSummary | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
 
   const refreshJob = () => {

@@ -1,4 +1,4 @@
-import { Job } from '@prisma/client';
+import { JobWithPowerSummary, PowerUsageSummary } from '@/types';
 import useGPUInfo from '@/hooks/useGPUInfo';
 import useCPUInfo from '@/hooks/useCPUInfo';
 import GPUWidget from '@/components/GPUWidget';
@@ -10,7 +10,49 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import useJobLog from '@/hooks/useJobLog';
 
 interface JobOverviewProps {
-  job: Job;
+  job: JobWithPowerSummary;
+}
+
+function formatProjectedCost(summary: PowerUsageSummary, currentStep: number, totalSteps: number) {
+  if (summary.estimatedCost == null) {
+    return '';
+  }
+
+  if (!Number.isFinite(currentStep) || !Number.isFinite(totalSteps) || currentStep <= 0 || totalSteps <= 0) {
+    return '';
+  }
+
+  const safeCurrentStep = Math.min(currentStep, totalSteps);
+  if (safeCurrentStep <= 0) {
+    return '';
+  }
+
+  const estimatedTotalCost = (summary.estimatedCost / safeCurrentStep) * totalSteps;
+  if (!Number.isFinite(estimatedTotalCost) || estimatedTotalCost < 0 || estimatedTotalCost > 1_000_000_000) {
+    return '';
+  }
+
+  return ` (estimating ${summary.currency ? `${summary.currency} ` : ''}${estimatedTotalCost.toFixed(2)} for ${totalSteps} steps)`;
+}
+
+function formatPowerSummary(summary: PowerUsageSummary | null | undefined, currentStep: number, totalSteps: number, jobStatus: string) {
+  if (!summary || summary.sampleCount <= 0) {
+    return null;
+  }
+
+  const averagePower = Math.round(summary.averagePowerW);
+  const peakPower = Math.round(summary.peakPowerW);
+  const energyKwh = summary.totalEnergyWh / 1000;
+  const costText =
+    summary.estimatedCost != null
+      ? ` | Cost ${summary.currency ? `${summary.currency} ` : ''}${summary.estimatedCost.toFixed(2)}`
+      : '';
+  const projectedCostText =
+    jobStatus === 'running' || jobStatus === 'queued' || jobStatus === 'stopping'
+      ? formatProjectedCost(summary, currentStep, totalSteps)
+      : '';
+
+  return `Avg ${averagePower} W | Peak ${peakPower} W | ${energyKwh.toFixed(2)} kWh${costText}${projectedCostText}`;
 }
 
 export default function JobOverview({ job }: JobOverviewProps) {
@@ -30,6 +72,7 @@ export default function JobOverview({ job }: JobOverviewProps) {
   const totalSteps = getTotalSteps(job);
   const progress = (job.step / totalSteps) * 100;
   const isStopping = job.stop && job.status === 'running';
+  const powerSummaryText = formatPowerSummary(job.powerSummary, job.step, totalSteps, job.status);
 
   const logLines: string[] = useMemo(() => {
     // split at line breaks on \n or \r\n but not \r
@@ -119,6 +162,9 @@ export default function JobOverview({ job }: JobOverviewProps) {
               <div>
                 <p className="text-xs text-gray-400">Job Name</p>
                 <p className="text-sm font-medium text-gray-200">{job.name}</p>
+                {powerSummaryText ? (
+                  <p className="text-xs text-gray-400 mt-1">{powerSummaryText}</p>
+                ) : null}
               </div>
             </div>
 
