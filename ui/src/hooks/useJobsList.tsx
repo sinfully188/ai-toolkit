@@ -4,14 +4,20 @@ import { useEffect, useState } from 'react';
 import { apiClient } from '@/utils/api';
 import { JobWithPowerSummary } from '@/types';
 
-export default function useJobsList(onlyActive = false, reloadInterval: null | number = null) {
+type UseJobsListProps = {
+  onlyActive?: boolean;
+  reloadInterval?: number | null;
+  job_type?: string | null;
+};
+
+export default function useJobsList({ onlyActive = false, reloadInterval = null, job_type = null }: UseJobsListProps = {}) {
   const [jobs, setJobs] = useState<JobWithPowerSummary[]>([]);
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
 
   const refreshJobs = () => {
     setStatus('loading');
     apiClient
-      .get('/api/jobs')
+      .get('/api/jobs', { params: job_type ? { job_type } : undefined })
       .then(res => res.data)
       .then(data => {
         console.log('Jobs:', data);

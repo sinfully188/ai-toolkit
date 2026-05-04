@@ -14,6 +14,7 @@ import useGPUInfo from '@/hooks/useGPUInfo';
 interface JobsTableProps {
   autoStartQueue?: boolean;
   onlyActive?: boolean;
+  job_type?: string | null;
 }
 
 function formatPowerSummary(summary?: PowerUsageSummary | null) {
@@ -32,8 +33,8 @@ function formatPowerSummary(summary?: PowerUsageSummary | null) {
   return `Avg ${averagePower} W | Peak ${peakPower} W | ${energyKwh.toFixed(2)} kWh${costText}`;
 }
 
-export default function JobsTable({ onlyActive = false }: JobsTableProps) {
-  const { jobs, status, refreshJobs } = useJobsList(onlyActive, 5000);
+export default function JobsTable({ onlyActive = false, job_type = null }: JobsTableProps) {
+  const { jobs, status, refreshJobs } = useJobsList({ onlyActive, reloadInterval: 5000, job_type });
   const { queues, status: queueStatus, refreshQueues } = useQueueList();
   const { gpuList, isGPUInfoLoaded } = useGPUInfo();
 
@@ -46,26 +47,42 @@ export default function JobsTable({ onlyActive = false }: JobsTableProps) {
     {
       title: 'Name',
       key: 'name',
-      render: row => (
-        <div>
-          <Link href={`/jobs/${row.id}`} className="font-medium whitespace-nowrap">
-            {['running', 'stopping'].includes(row.status) ? (
-              <CgSpinner className="inline animate-spin mr-2 text-blue-400" />
+      render: row => {
+        let title = row.name;
+        // if (row.job_type === 'train') title = `Train: ${title}`;
+        if (row.job_type === 'caption') {
+          let splits = row.job_ref.split(/[/\\]/);
+          const datasetPath = `${splits[splits.length - 1]}`;
+          title = (
+            <>
+              <small className="opacity-50">CAPTION: </small> {datasetPath}
+            </>
+          );
+        }
+        return (
+          <div>
+            <Link href={`/jobs/${row.id}`} className="font-medium whitespace-nowrap">
+              {['running', 'stopping'].includes(row.status) ? (
+                <CgSpinner className="inline animate-spin mr-2 text-blue-400" />
+              ) : null}
+              {title}
+            </Link>
+            {formatPowerSummary(row.powerSummary) ? (
+              <div className="text-xs text-gray-400 mt-1">{formatPowerSummary(row.powerSummary)}</div>
             ) : null}
-            {row.name}
-          </Link>
-          {formatPowerSummary(row.powerSummary) ? (
-            <div className="text-xs text-gray-400 mt-1">{formatPowerSummary(row.powerSummary)}</div>
-          ) : null}
-        </div>
-      ),
+          </div>
+        );
+      },
     },
     {
       title: 'Steps',
       key: 'steps',
       render: row => {
         const jobConfig: JobConfig = JSON.parse(row.job_config);
-        const totalSteps = jobConfig.config.process[0].train.steps;
+        if (row.job_type !== 'train') {
+          return <></>;
+        }
+        const totalSteps = jobConfig.config.process[0].train?.steps;
 
         return (
           <div>

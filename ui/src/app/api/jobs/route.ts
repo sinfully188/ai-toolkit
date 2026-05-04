@@ -97,6 +97,8 @@ async function attachPowerSummary(job: any) {
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const id = searchParams.get('id');
+  const job_ref = searchParams.get('job_ref');
+  const job_type = searchParams.get('job_type');
 
   try {
     if (id) {
@@ -105,8 +107,16 @@ export async function GET(request: Request) {
       });
       return NextResponse.json(job ? await attachPowerSummary(job) : null);
     }
+    if (job_ref) {
+      const job = await prisma.job.findFirst({
+        where: { job_ref },
+        orderBy: { updated_at: 'desc' },
+      });
+      return NextResponse.json(job);
+    }
 
     const jobs = await prisma.job.findMany({
+      where: job_type ? { job_type } : undefined,
       orderBy: { created_at: 'desc' },
     });
     return NextResponse.json({ jobs: await Promise.all(jobs.map(attachPowerSummary)) });
@@ -126,6 +136,15 @@ export async function POST(request: Request) {
       gpu_ids = "mps";
     }
 
+    const extra: any = {};
+    if ("job_ref" in body) {
+      extra["job_ref"] = body.job_ref;
+    }
+
+    if ("job_type" in body) {
+      extra["job_type"] = body.job_type;
+    }
+
     if (id) {
       // Update existing training
       const training = await prisma.job.update({
@@ -134,6 +153,7 @@ export async function POST(request: Request) {
           name,
           gpu_ids,
           job_config: JSON.stringify(job_config),
+          ...extra,
         },
       });
       return NextResponse.json(training);
@@ -153,6 +173,7 @@ export async function POST(request: Request) {
           gpu_ids,
           job_config: JSON.stringify(job_config),
           queue_position: newQueuePosition,
+          ...extra,
         },
       });
       return NextResponse.json(training);

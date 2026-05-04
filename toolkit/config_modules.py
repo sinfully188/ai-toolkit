@@ -6,6 +6,7 @@ import random
 import torch
 import torchaudio
 
+from toolkit.audio.album_artwork import add_album_artwork
 from toolkit.prompt_utils import PromptEmbeds
 from torchao.quantization.quant_primitives import _DTYPE_TO_BIT_WIDTH
 
@@ -523,7 +524,7 @@ class TrainConfig:
         self.correct_pred_norm = kwargs.get('correct_pred_norm', False)
         self.correct_pred_norm_multiplier = kwargs.get('correct_pred_norm_multiplier', 1.0)
 
-        self.loss_type = kwargs.get('loss_type', 'mse') # mse, mae, wavelet, pixelspace, mean_flow
+        self.loss_type = kwargs.get('loss_type', 'mse') # mse, mae, wavelet, pixelspace, mean_flow, pseudo_huber
         
         # do the loss on a timestep to 0 prediction
         self.t0_loss_target = kwargs.get('t0_loss_target', False)
@@ -730,6 +731,8 @@ class ModelConfig:
         
         # model paths for models that support it
         self.model_paths = kwargs.get("model_paths", {})
+        
+        self.in_context = kwargs.get("in_context", False)
         
         # allow frontend to pass arch with a color like arch:tag
         # but remove the tag
@@ -1226,15 +1229,18 @@ class GenerateImageConfig:
                 )
             else:
                 raise ValueError(f"Unsupported video format {self.output_ext}")
-        elif self.output_ext in ['wav', 'mp3']:
+        elif self.output_ext in ['wav', 'mp3', 'flac', 'ogg']:
             # save audio file
+            audio_path = self.get_image_path(count, max_count)
             torchaudio.save(
-                self.get_image_path(count, max_count), 
+                audio_path, 
                 image[0].to('cpu'),
                 sample_rate=48000, 
                 format=None, 
                 backend=None
             )
+            if self.output_ext == 'mp3':
+                add_album_artwork(audio_path)
         else:
             # TODO save image gen header info for A1111 and us, our seeds probably wont match
             image.save(self.get_image_path(count, max_count))
