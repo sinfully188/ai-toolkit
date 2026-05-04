@@ -90,6 +90,7 @@ export const defaultJobConfig: JobConfig = {
           skip_first_sample: false,
           force_first_sample: false,
           disable_sampling: false,
+          step_pause_seconds: 0,
           dtype: 'bf16',
           diff_output_preservation: false,
           diff_output_preservation_multiplier: 1.0,

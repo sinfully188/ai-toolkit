@@ -461,6 +461,7 @@ class TrainConfig:
         # this will do proper gradient accumulation where you will not see a step until the end of the accumulation
         # the method above will show a step every accumulation
         self.gradient_accumulation = kwargs.get('gradient_accumulation', 1)
+        self.step_pause_seconds = kwargs.get('step_pause_seconds', 0.0)
         if self.gradient_accumulation > 1:
             if self.gradient_accumulation_steps != 1:
                 raise ValueError("gradient_accumulation and gradient_accumulation_steps are mutually exclusive")

@@ -63,7 +63,7 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
 
         # Get the weights for the timesteps
         if timestep_type == "weighted":
-            weights = torch.tensor(
+            return torch.tensor(
                 [default_weighing_scheme[i] for i in step_indices],
                 device=timesteps.device,
                 dtype=timesteps.dtype

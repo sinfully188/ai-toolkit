@@ -1,5 +1,6 @@
 import os
 import random
+import time
 from collections import OrderedDict
 from typing import Union, Literal, List, Optional
 
@@ -1213,6 +1214,12 @@ class SDTrainer(BaseSDTrainProcess):
 
     def end_of_training_loop(self):
         pass
+
+    def end_step_hook(self):
+        super().end_step_hook()
+        step_pause_seconds = getattr(self.train_config, 'step_pause_seconds', 0.0) or 0.0
+        if step_pause_seconds > 0:
+            time.sleep(step_pause_seconds)
 
     def predict_noise(
         self,

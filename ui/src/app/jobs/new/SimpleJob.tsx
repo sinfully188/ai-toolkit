@@ -60,6 +60,8 @@ const trainingIntentOptions: SelectOption[] = [
   { value: 'style', label: 'Style or Look' },
 ];
 
+const ltxAudioExcludePatterns = ['audio_attn1', 'audio_attn2', 'audio_ff', 'audio_to_video_attn', 'video_to_audio_attn'];
+
 const applyTrainingIntentPreset = (
   preset: string,
   setJobConfig: (value: any, key: string) => void,
@@ -649,6 +651,16 @@ export default function SimpleJob({
                   min={1}
                   required
                 />
+                <NumberInput
+                  label="Go Slow Delay (sec)"
+                  className="pt-2"
+                  value={jobConfig.config.process[0].train.step_pause_seconds ?? 0}
+                  onChange={value => setJobConfig(value, 'config.process[0].train.step_pause_seconds')}
+                  placeholder="eg. 0.25"
+                  min={0}
+                  step={0.05}
+                  docKey={'train.step_pause_seconds'}
+                />
               </div>
               <div>
                 <SelectInput
@@ -772,6 +784,26 @@ export default function SimpleJob({
                     placeholder="eg. 1.0"
                     docKey={'train.audio_loss_multiplier'}
                     min={0}
+                  />
+                )}
+                {modelArch?.additionalSections?.includes('network.exclude_audio_training') && (
+                  <Checkbox
+                    label="Exclude Audio Training"
+                    className="pt-2"
+                    checked={ltxAudioExcludePatterns.every(pattern =>
+                      jobConfig.config.process[0].network?.network_kwargs?.ignore_if_contains?.includes(pattern)
+                    )}
+                    onChange={value => {
+                      const currentIgnore = jobConfig.config.process[0].network?.network_kwargs?.ignore_if_contains || [];
+                      if (value) {
+                        const nextIgnore = Array.from(new Set([...currentIgnore, ...ltxAudioExcludePatterns]));
+                        setJobConfig(nextIgnore, 'config.process[0].network.network_kwargs.ignore_if_contains');
+                      } else {
+                        const nextIgnore = currentIgnore.filter(pattern => !ltxAudioExcludePatterns.includes(pattern));
+                        setJobConfig(nextIgnore, 'config.process[0].network.network_kwargs.ignore_if_contains');
+                      }
+                    }}
+                    docKey={'network.exclude_audio_training'}
                   />
                 )}
               </div>

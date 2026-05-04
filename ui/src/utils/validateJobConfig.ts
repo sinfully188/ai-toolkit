@@ -26,6 +26,14 @@ export function validateJobConfig(jobConfig: JobConfig): ValidationResult {
   const network = process.network;
   const datasets = process.datasets;
   const triggerWord = process.trigger_word;
+  const networkType = network?.type?.toLowerCase?.();
+  const isLoraLikeTraining = networkType === 'lora' || networkType === 'lokr';
+  const isLtxModel = model?.arch === 'ltx2' || model?.arch === 'ltx2.3';
+  const hasVideoDatasets = !!datasets?.some((d: any) => (d?.num_frames ?? 1) > 1);
+  const allDatasetsAudioDisabled = !!datasets?.length && datasets.every((d: any) => !d?.do_audio);
+  const ignoreIfContains = network?.network_kwargs?.ignore_if_contains || [];
+  const ltxAudioExcludePatterns = ['audio_attn1', 'audio_attn2', 'audio_ff', 'audio_to_video_attn', 'video_to_audio_attn'];
+  const excludesLtxAudioTraining = ltxAudioExcludePatterns.every(pattern => ignoreIfContains.includes(pattern));
 
   // ─── Required fields ───────────────────────────────────────────────
   if (!jobConfig.config.name || jobConfig.config.name.trim() === '') {
@@ -138,12 +146,36 @@ export function validateJobConfig(jobConfig: JobConfig): ValidationResult {
     );
   }
 
+  if (isLtxModel && hasVideoDatasets && allDatasetsAudioDisabled) {
+    warnings.push(
+      'LTX video training with audio disabled does not mute generated audio. The audio branch still runs during generation, but it is not supervised during training, so outputs may contain distorted sound rather than silence.'
+    );
+
+    if (!excludesLtxAudioTraining) {
+      warnings.push(
+        'For visual-only LTX LoRAs, enable "Exclude Audio Training" to keep the LoRA from modifying audio-side transformer modules. This helps preserve cleaner audio and reduces conflicts with separate voice LoRAs.'
+      );
+    }
+  }
+
   if (train?.steps && train.steps < 1) {
     errors.push('Training steps must be at least 1.');
   }
 
   if (train?.lr && train.lr <= 0) {
     errors.push('Learning rate must be greater than 0.');
+  }
+
+  if (train?.lr && train.lr > 0 && isLoraLikeTraining) {
+    if (train.lr >= 0.001) {
+      warnings.push(
+        `Learning rate ${train.lr} is unusually high for LoRA training. Common LoRA starting values are often around 0.0001, and rates at or above 0.001 can destabilize training or produce noisy results.`
+      );
+    } else if (train.lr < 0.00001) {
+      warnings.push(
+        `Learning rate ${train.lr} is unusually low for LoRA training. This may train very slowly or appear to make little progress unless the run is very long.`
+      );
+    }
   }
 
   if (train?.lr_scheduler === 'cosine_with_restarts') {
@@ -155,6 +187,16 @@ export function validateJobConfig(jobConfig: JobConfig): ValidationResult {
 
   if (train?.batch_size && train.batch_size < 1) {
     errors.push('Batch size must be at least 1.');
+  }
+
+  if ((train?.step_pause_seconds ?? 0) < 0) {
+    errors.push('Go Slow Delay must be 0 or greater.');
+  }
+
+  if ((train?.step_pause_seconds ?? 0) >= 1) {
+    warnings.push(
+      `Go Slow Delay is set to ${train?.step_pause_seconds} seconds per step. This will deliberately reduce throughput and extend total training time.`
+    );
   }
 
   if (!datasets || datasets.length === 0) {

@@ -1,4 +1,5 @@
 from collections import OrderedDict
+import json
 import os
 import sqlite3
 import asyncio
@@ -133,6 +134,31 @@ class UITrainer(SDTrainer):
 
         return _check_return_to_queue()
 
+    def refresh_live_training_controls(self):
+        def _read_job_config():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT job_config FROM Job WHERE id = ?", (self.job_id,)
+                )
+                row = cursor.fetchone()
+                return None if row is None else row[0]
+
+        try:
+            job_config_raw = _read_job_config()
+            if not job_config_raw:
+                return
+            job_config = json.loads(job_config_raw)
+            live_step_pause_seconds = (
+                job_config.get("config", {})
+                .get("process", [{}])[0]
+                .get("train", {})
+                .get("step_pause_seconds", self.train_config.step_pause_seconds)
+            )
+            self.train_config.step_pause_seconds = max(0.0, float(live_step_pause_seconds))
+        except Exception:
+            pass
+
     def maybe_stop(self):
         if self.should_stop():
             self._run_async_operation(
@@ -261,9 +287,10 @@ class UITrainer(SDTrainer):
         self.thread_pool.shutdown(wait=True)
 
     def end_step_hook(self):
-        super(UITrainer, self).end_step_hook()
         self.update_step()
         self.maybe_stop()
+        self.refresh_live_training_controls()
+        super(UITrainer, self).end_step_hook()
 
     def hook_before_model_load(self):
         super().hook_before_model_load()

@@ -8,9 +8,34 @@ import { getTotalSteps } from '@/utils/jobs';
 import { Cpu, HardDrive, Info, Gauge } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import useJobLog from '@/hooks/useJobLog';
+import { apiClient } from '@/utils/api';
 
 interface JobOverviewProps {
   job: JobWithPowerSummary;
+}
+
+const MAX_THROTTLE_DELAY_SECONDS = 0.25;
+
+function getCurrentStepPauseSeconds(job: JobWithPowerSummary) {
+  try {
+    const jobConfig = JSON.parse(job.job_config);
+    const value = jobConfig?.config?.process?.[0]?.train?.step_pause_seconds ?? 0;
+    const numericValue = Number(value);
+    return Number.isFinite(numericValue) ? Math.max(0, numericValue) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function stepPauseSecondsToPowerPercent(stepPauseSeconds: number) {
+  const clampedDelay = Math.min(MAX_THROTTLE_DELAY_SECONDS, Math.max(0, stepPauseSeconds));
+  return Math.round(((MAX_THROTTLE_DELAY_SECONDS - clampedDelay) / MAX_THROTTLE_DELAY_SECONDS) * 100);
+}
+
+function powerPercentToStepPauseSeconds(powerPercent: number) {
+  const clampedPercent = Math.min(100, Math.max(0, powerPercent));
+  const delay = ((100 - clampedPercent) / 100) * MAX_THROTTLE_DELAY_SECONDS;
+  return Math.round(delay * 1000) / 1000;
 }
 
 function formatProjectedCost(summary: PowerUsageSummary, currentStep: number, totalSteps: number) {
@@ -56,6 +81,7 @@ function formatPowerSummary(summary: PowerUsageSummary | null | undefined, curre
 }
 
 export default function JobOverview({ job }: JobOverviewProps) {
+  const currentStepPauseSeconds = useMemo(() => getCurrentStepPauseSeconds(job), [job]);
   const gpuIds = useMemo(() => {
     if (job.gpu_ids === 'mps') {
       return [0]; // For MPS, we can just return a single GPU ID since it's virtualized
@@ -64,6 +90,7 @@ export default function JobOverview({ job }: JobOverviewProps) {
   }, [job.gpu_ids]);
   const { log, setLog, status: statusLog, refresh: refreshLog } = useJobLog(job.id, 2000);
   const logRef = useRef<HTMLDivElement>(null);
+  const lastSavedPowerPercentRef = useRef(stepPauseSecondsToPowerPercent(currentStepPauseSeconds));
   // Track whether we should auto-scroll to bottom
   const [isScrolledToBottom, setIsScrolledToBottom] = useState(true);
   console.log('job.gpu_ids', job.gpu_ids);
@@ -73,6 +100,11 @@ export default function JobOverview({ job }: JobOverviewProps) {
   const progress = (job.step / totalSteps) * 100;
   const isStopping = job.stop && job.status === 'running';
   const powerSummaryText = formatPowerSummary(job.powerSummary, job.step, totalSteps, job.status);
+  const liveThrottleEnabled = ['running', 'queued', 'stopping'].includes(job.status);
+  const [powerPercent, setPowerPercent] = useState(stepPauseSecondsToPowerPercent(currentStepPauseSeconds));
+  const [isDraggingThrottle, setIsDraggingThrottle] = useState(false);
+  const [isSavingThrottle, setIsSavingThrottle] = useState(false);
+  const [throttleError, setThrottleError] = useState<string | null>(null);
 
   const logLines: string[] = useMemo(() => {
     // split at line breaks on \n or \r\n but not \r
@@ -107,6 +139,38 @@ export default function JobOverview({ job }: JobOverviewProps) {
       logRef.current.scrollTop = logRef.current.scrollHeight;
     }
   }, [log, isScrolledToBottom]);
+
+  useEffect(() => {
+    if (!isDraggingThrottle) {
+      const nextPowerPercent = stepPauseSecondsToPowerPercent(currentStepPauseSeconds);
+      setPowerPercent(nextPowerPercent);
+      lastSavedPowerPercentRef.current = nextPowerPercent;
+    }
+  }, [currentStepPauseSeconds, isDraggingThrottle]);
+
+  const saveThrottle = async (nextPowerPercent: number) => {
+    if (!liveThrottleEnabled) {
+      return;
+    }
+
+    if (lastSavedPowerPercentRef.current === nextPowerPercent) {
+      return;
+    }
+
+    setIsSavingThrottle(true);
+    setThrottleError(null);
+    try {
+      await apiClient.patch(`/api/jobs/${job.id}/throttle`, {
+        powerPercent: nextPowerPercent,
+      });
+      lastSavedPowerPercentRef.current = nextPowerPercent;
+    } catch (error) {
+      console.error('Error updating live throttle:', error);
+      setThrottleError('Failed to update throttle');
+    } finally {
+      setIsSavingThrottle(false);
+    }
+  };
 
   const getStatusColor = (status: string) => {
     switch (status.toLowerCase()) {
@@ -186,6 +250,59 @@ export default function JobOverview({ job }: JobOverviewProps) {
                 <p className="text-xs text-gray-400">Speed</p>
                 <p className="text-sm font-medium text-gray-200">{job.speed_string == '' ? '?' : job.speed_string}</p>
               </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-gray-800 bg-gray-950 p-4">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-sm font-medium text-gray-200">Training Power</p>
+                <p className="text-xs text-gray-400">
+                  0% adds {MAX_THROTTLE_DELAY_SECONDS.toFixed(2)}s delay per step. 100% means no throttling.
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-sm font-medium text-gray-200">{powerPercent}%</p>
+                <p className="text-xs text-gray-400">{powerPercentToStepPauseSeconds(powerPercent).toFixed(2)}s delay</p>
+              </div>
+            </div>
+            <div className="pt-3">
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={powerPercent}
+                disabled={!liveThrottleEnabled || isSavingThrottle}
+                onMouseDown={() => setIsDraggingThrottle(true)}
+                onTouchStart={() => setIsDraggingThrottle(true)}
+                onChange={event => setPowerPercent(Number(event.target.value))}
+                onMouseUp={async event => {
+                  setIsDraggingThrottle(false);
+                  await saveThrottle(Number((event.target as HTMLInputElement).value));
+                }}
+                onTouchEnd={async event => {
+                  setIsDraggingThrottle(false);
+                  await saveThrottle(Number((event.target as HTMLInputElement).value));
+                }}
+                onKeyUp={async event => {
+                  await saveThrottle(Number((event.target as HTMLInputElement).value));
+                }}
+                onBlur={async event => {
+                  setIsDraggingThrottle(false);
+                  await saveThrottle(Number((event.target as HTMLInputElement).value));
+                }}
+                className="w-full accent-blue-500 disabled:opacity-50"
+              />
+              <div className="mt-2 flex justify-between text-[11px] text-gray-500">
+                <span>Max throttle</span>
+                <span>No throttle</span>
+              </div>
+              {!liveThrottleEnabled ? (
+                <p className="mt-2 text-xs text-gray-500">Available while the job is running or queued.</p>
+              ) : null}
+              {isSavingThrottle ? <p className="mt-2 text-xs text-gray-400">Updating throttle...</p> : null}
+              {throttleError ? <p className="mt-2 text-xs text-rose-400">{throttleError}</p> : null}
             </div>
           </div>
 

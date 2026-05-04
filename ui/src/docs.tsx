@@ -114,6 +114,25 @@ const docs: { [key: string]: ConfigDoc } = {
         For models that support audio with video, this option will load the audio from the video and resize it to match
         the video sequence. Since the video is automatically resized, the audio may drop or raise in pitch to match the
         new speed of the video. It is important to prep your dataset to have the proper length before training.
+        <br />
+        <br />
+        For LTX models, disabling audio does not currently force silent output. The audio branch is still present at
+        generation time, so training without audio can leave generated sound unsupervised and sometimes distorted rather
+        than silent.
+      </>
+    ),
+  },
+  'network.exclude_audio_training': {
+    title: 'Exclude Audio Training',
+    description: (
+      <>
+        For LTX LoRA training, this excludes the audio-specific and audio-video cross-modal transformer modules from
+        LoRA attachment. Use this for visual-only LoRAs when you want to preserve clean base-model audio or combine the
+        result with a separate voice LoRA.
+        <br />
+        <br />
+        This does not disable the LTX audio branch itself. It prevents the LoRA from modifying those audio-side
+        modules, so it is mainly a quality and isolation fix rather than a large speed optimization.
       </>
     ),
   },
@@ -238,6 +257,19 @@ const docs: { [key: string]: ConfigDoc } = {
         <br />
         The swap happens at the batch level, meaning it will swap between a gradient accumulation steps. To train both
         stages in a single step, set them to switch every 1 step and set gradient accumulation to 2.
+      </>
+    ),
+  },
+  'train.step_pause_seconds': {
+    title: 'Go Slow Delay',
+    description: (
+      <>
+        Adds an intentional pause after each completed training step.
+        <br />
+        <br />
+        This is a simple way to reduce GPU duty cycle, power draw, fan noise, and room heating when you do not need
+        maximum throughput. A value like <strong>0.1</strong> to <strong>0.5</strong> can noticeably slow training
+        without fully idling the job, while larger values will extend total wall-clock time substantially.
       </>
     ),
   },

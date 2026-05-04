@@ -162,6 +162,7 @@ export interface TrainConfig {
   skip_first_sample: boolean;
   force_first_sample: boolean;
   disable_sampling: boolean;
+  step_pause_seconds?: number;
   diff_output_preservation: boolean;
   diff_output_preservation_multiplier: number;
   diff_output_preservation_class: string;

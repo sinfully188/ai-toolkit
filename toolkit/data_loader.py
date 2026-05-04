@@ -687,12 +687,26 @@ def get_dataloader_from_datasets(
     # check if is caching latents
 
     dataloader_kwargs = {}
+    has_video_dataset = any(
+        config.num_frames > 1 or config.auto_frame_count for config in dataset_config_list
+    )
+    has_audio_dataset = any(config.do_audio for config in dataset_config_list)
+    requested_num_workers = dataset_config_list[0].num_workers
     
     if is_native_windows() or is_macos():
         dataloader_kwargs['num_workers'] = 0
+        if requested_num_workers > 0 and (has_video_dataset or has_audio_dataset):
+            print_acc(
+                "WARNING: Using num_workers=0 on this platform. Video/audio dataset loading will run on the main process, which can leave the GPU underutilized during LTX training. Consider cache_latents/cache_latents_to_disk, cache_text_embeddings, or running on Linux/WSL for better throughput."
+            )
     else:
-        dataloader_kwargs['num_workers'] = dataset_config_list[0].num_workers
+        dataloader_kwargs['num_workers'] = requested_num_workers
         dataloader_kwargs['prefetch_factor'] = dataset_config_list[0].prefetch_factor
+        if requested_num_workers > 0:
+            dataloader_kwargs['persistent_workers'] = True
+
+    if torch.cuda.is_available():
+        dataloader_kwargs['pin_memory'] = True
 
     if has_buckets:
         # make sure they all have buckets
