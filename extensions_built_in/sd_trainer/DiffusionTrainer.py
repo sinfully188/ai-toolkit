@@ -10,6 +10,8 @@ import threading
 import time
 import signal
 from toolkit.power_usage import PowerUsageTracker
+from toolkit.basic import flush
+from toolkit.print import print_acc
 
 AITK_Status = Literal["running", "stopped", "error", "completed"]
 
@@ -209,6 +211,36 @@ class DiffusionTrainer(SDTrainer):
             self.is_stopping = True
             raise Exception("Job returning to queue")
 
+    def should_save(self):
+        if not self.is_ui_trainer:
+            return False
+        def _check_save():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT save_now FROM Job WHERE id = ?", (self.job_id,))
+                save_now = cursor.fetchone()
+                return False if save_now is None else save_now[0] == 1
+
+        return self._retry_db_operation(_check_save)
+
+    def maybe_save(self):
+        if not self.is_ui_trainer:
+            return
+        if self.should_save():
+            self.update_db_key("save_now", 0)
+            if self.progress_bar is not None:
+                self.progress_bar.pause()
+            print_acc(f"\nSaving at step {self.step_num}")
+            # clear any grads
+            self.optimizer.zero_grad()
+            self.save(self.step_num)
+            self.ensure_params_requires_grad()
+            flush()
+            if self.progress_bar is not None:
+                self.progress_bar.unpause()
+            self.save(self.step_num)
+
     async def _update_key(self, key, value):
         if not self.accelerator.is_main_process:
             return
@@ -335,6 +367,7 @@ class DiffusionTrainer(SDTrainer):
             self.update_step()
             self.maybe_stop()
             self.refresh_live_training_controls()
+            self.maybe_save()
         super(DiffusionTrainer, self).end_step_hook()
 
     def hook_before_model_load(self):

@@ -25,14 +25,16 @@ export async function POST(request: NextRequest) {
     const filepath = imgPath;
     console.log('Decoded image path:', filepath);
 
+    const resolvedFilePath = path.resolve(filepath);
+
     // caption name is the filepath without extension but with .txt
-    const captionPath = filepath.replace(/\.[^/.]+$/, '') + '.txt';
+    const captionPath = resolvedFilePath.replace(/\.[^/.]+$/, '') + '.txt';
 
     // Get allowed directories
     const allowedDir = await getDatasetsRoot();
 
-    // Security check: Ensure path is in allowed directory
-    const isAllowed = !pathContainsTraversal(filepath) && (await isPathAllowed(filepath, [allowedDir]));
+    // Security check: resolve the path and verify it's still under the allowed root.
+    const isAllowed = !pathContainsTraversal(filepath) && (await isPathAllowed(resolvedFilePath, [allowedDir]));
 
     if (!isAllowed) {
       console.warn(`Access denied: ${filepath} not in ${allowedDir}`);

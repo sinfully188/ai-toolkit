@@ -4,6 +4,7 @@ import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { TOOLKIT_ROOT, getTrainingFolder, getHFToken } from '../paths';
+import { resolvePythonPath } from '../pythonPath';
 const isWindows = process.platform === 'win32';
 
 const startAndWatchJob = (job: Job) => {
@@ -60,25 +61,8 @@ const startAndWatchJob = (job: Job) => {
     console.log(`[StartJob] Writing config file to: ${configPath}`);
     fs.writeFileSync(configPath, JSON.stringify(jobConfig, null, 2));
 
-    let pythonPath = 'python';
-    // use .venv or venv if it exists
-    if (fs.existsSync(path.join(TOOLKIT_ROOT, '.venv'))) {
-      if (isWindows) {
-        pythonPath = path.join(TOOLKIT_ROOT, '.venv', 'Scripts', 'python.exe');
-      } else {
-        pythonPath = path.join(TOOLKIT_ROOT, '.venv', 'bin', 'python');
-      }
-      console.log(`[StartJob] Found .venv, using Python at: ${pythonPath}`);
-    } else if (fs.existsSync(path.join(TOOLKIT_ROOT, 'venv'))) {
-      if (isWindows) {
-        pythonPath = path.join(TOOLKIT_ROOT, 'venv', 'Scripts', 'python.exe');
-      } else {
-        pythonPath = path.join(TOOLKIT_ROOT, 'venv', 'bin', 'python');
-      }
-      console.log(`[StartJob] Found venv, using Python at: ${pythonPath}`);
-    } else {
-      console.log(`[StartJob] No venv found, using system Python: ${pythonPath}`);
-    }
+    const pythonPath = resolvePythonPath();
+    console.log(`[StartJob] Using Python at: ${pythonPath}`);
 
     const runFilePath = path.join(TOOLKIT_ROOT, 'run.py');
     if (!fs.existsSync(runFilePath)) {
