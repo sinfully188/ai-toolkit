@@ -73,11 +73,12 @@ import hashlib
 from toolkit.util.blended_blur_noise import get_blended_blur_noise
 from toolkit.util.get_model import get_model_class
 from toolkit.basic import flush
+from jobs.process.auto_save import AutoSaveManager
 from toolkit.power_usage import read_power_usage_summary
 
 
 class BaseSDTrainProcess(BaseTrainProcess):
-    AUTOSAVE_PREFIX = 'autosave-'
+    AUTOSAVE_PREFIX = AutoSaveManager.AUTOSAVE_PREFIX
 
     def __init__(self, process_id: int, job, config: OrderedDict, custom_pipeline=None):
         super().__init__(process_id, job, config)
@@ -265,6 +266,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.num_consecutive_oom = 0
         self.resume_save_prefix = ''
         self.last_timed_save_time = time.time()
+        self.auto_save_manager = AutoSaveManager(self)
 
     def post_process_generate_image_config_list(self, generate_image_config_list: List[GenerateImageConfig]):
         # override in subclass
@@ -406,28 +408,16 @@ class BaseSDTrainProcess(BaseTrainProcess):
         return info
 
     def _is_autosave_enabled(self):
-        interval_minutes = getattr(self.save_config, 'autosave_every_minutes', 0)
-        return interval_minutes is not None and interval_minutes > 0
+        return self.auto_save_manager.is_enabled()
 
     def _should_run_autosave(self):
-        if not self.accelerator.is_main_process or not self._is_autosave_enabled():
-            return False
-        interval_seconds = float(self.save_config.autosave_every_minutes) * 60.0
-        return (time.time() - self.last_timed_save_time) >= interval_seconds
+        return self.auto_save_manager.should_run()
 
     def _get_save_prefix_from_path(self, path):
-        if path is None:
-            return ''
-        name = os.path.basename(os.path.normpath(path))
-        if name.startswith(self.AUTOSAVE_PREFIX):
-            return self.AUTOSAVE_PREFIX
-        return ''
+        return self.auto_save_manager.get_save_prefix_from_path(path)
 
     def _normalize_save_name(self, path):
-        name = os.path.basename(os.path.normpath(path))
-        if name.startswith(self.AUTOSAVE_PREFIX):
-            return name[len(self.AUTOSAVE_PREFIX):]
-        return name
+        return self.auto_save_manager.normalize_save_name(path)
 
     def _make_output_path(self, filename, save_prefix=''):
         return os.path.join(self.save_root, f'{save_prefix}{filename}')
@@ -520,98 +510,22 @@ class BaseSDTrainProcess(BaseTrainProcess):
         return self._save_path_atomically(final_path, lambda temp_path: torch.save(data, temp_path))
 
     def _get_resume_artifact_candidates(self, filename):
-        candidates = []
-        prefixes = []
-        if self.resume_save_prefix:
-            prefixes.append(self.resume_save_prefix)
-        prefixes.append('')
-        for prefix in prefixes:
-            candidate = self._make_output_path(filename, prefix)
-            if candidate not in candidates:
-                candidates.append(candidate)
-        return candidates
+        return self.auto_save_manager.get_resume_artifact_candidates(filename)
 
     def _save_resume_training_state(self, save_prefix=''):
-        training_state = {
-            'step_num': self.step_num,
-            'start_step': self.start_step,
-            'epoch_num': self.epoch_num,
-            'grad_accumulation_step': self.grad_accumulation_step,
-            'python_random_state': random.getstate(),
-            'numpy_random_state': np.random.get_state(),
-            'torch_random_state': torch.get_rng_state(),
-            'torch_cuda_random_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-        }
-        training_state_path = self._make_output_path('training_state.pt', save_prefix)
-        self._write_torch_atomic(training_state, training_state_path)
+        self.auto_save_manager.save_resume_training_state(save_prefix)
 
     def _load_resume_training_state(self):
-        for training_state_path in self._get_resume_artifact_candidates('training_state.pt'):
-            if not os.path.exists(training_state_path):
-                continue
-            try:
-                training_state = torch.load(training_state_path, map_location='cpu', weights_only=False)
-                if self.train_config.start_step is None and 'step_num' in training_state:
-                    self.step_num = training_state['step_num']
-                    self.start_step = self.step_num
-                self.epoch_num = training_state.get('epoch_num', self.epoch_num)
-                self.grad_accumulation_step = training_state.get('grad_accumulation_step', self.grad_accumulation_step)
-                if 'python_random_state' in training_state:
-                    random.setstate(training_state['python_random_state'])
-                if 'numpy_random_state' in training_state:
-                    np.random.set_state(training_state['numpy_random_state'])
-                if 'torch_random_state' in training_state:
-                    torch.set_rng_state(training_state['torch_random_state'])
-                cuda_state = training_state.get('torch_cuda_random_state', None)
-                if torch.cuda.is_available() and cuda_state is not None:
-                    torch.cuda.set_rng_state_all(cuda_state)
-                print_acc(f'Loaded training state from {training_state_path}')
-            except Exception as e:
-                print_acc(f'Failed to load training state from {training_state_path}')
-                print_acc(e)
-            break
+        self.auto_save_manager.load_resume_training_state()
 
     def _load_resume_scheduler_state(self):
-        if self.lr_scheduler is None:
-            return
-        for scheduler_state_path in self._get_resume_artifact_candidates('lr_scheduler.pt'):
-            if not os.path.exists(scheduler_state_path):
-                continue
-            try:
-                print_acc(f'Loading lr scheduler state from {scheduler_state_path}')
-                scheduler_state = torch.load(scheduler_state_path, map_location='cpu', weights_only=False)
-                self.lr_scheduler.load_state_dict(scheduler_state)
-            except Exception as e:
-                print_acc(f'Failed to load lr scheduler state from {scheduler_state_path}')
-                print_acc(e)
-            break
+        self.auto_save_manager.load_resume_scheduler_state()
 
     def _clear_autosave_artifacts(self):
-        if not os.path.exists(self.save_root):
-            return
-        for pattern in [
-            f'{self.AUTOSAVE_PREFIX}*',
-            f'{self.AUTOSAVE_PREFIX}*.tmp',
-            f'{self.AUTOSAVE_PREFIX}*.bak',
-        ]:
-            for item in glob.glob(os.path.join(self.save_root, pattern)):
-                self._remove_path(item)
+        self.auto_save_manager.clear_autosave_artifacts()
 
     def _clear_legacy_autosave_step_artifacts(self):
-        if not os.path.exists(self.save_root):
-            return
-        legacy_autosave_pattern = re.compile(
-            rf'^{re.escape(self.AUTOSAVE_PREFIX)}.+_\d{{9}}(?:$|[._])'
-        )
-        for pattern in [
-            f'{self.AUTOSAVE_PREFIX}*',
-            f'{self.AUTOSAVE_PREFIX}*.tmp',
-            f'{self.AUTOSAVE_PREFIX}*.bak',
-        ]:
-            for item in glob.glob(os.path.join(self.save_root, pattern)):
-                name = os.path.basename(os.path.normpath(item))
-                if legacy_autosave_pattern.match(name):
-                    self._remove_path(item)
+        self.auto_save_manager.clear_legacy_autosave_step_artifacts()
 
     def clean_up_saves(self):
         if not self.accelerator.is_main_process:
@@ -929,22 +843,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 print_acc(e)
                 print_acc("Could not save optimizer")
 
-        if is_autosave:
-            if self.lr_scheduler is not None:
-                self._write_torch_atomic(
-                    self.lr_scheduler.state_dict(),
-                    self._make_output_path('lr_scheduler.pt', save_prefix)
-                )
-            self._save_resume_training_state(save_prefix)
-            self._write_yaml_atomic(self.job.raw_config, self._make_output_path('config.yaml', save_prefix))
-            self._clear_legacy_autosave_step_artifacts()
-
-        if not is_autosave:
-            self.clean_up_saves()
-            self._clear_autosave_artifacts()
-            self.post_save_hook(primary_save_path)
-
-        self.last_timed_save_time = time.time()
+        self.auto_save_manager.finalize_save(is_autosave, primary_save_path)
 
         if self.ema is not None:
             self.ema.train()
@@ -2587,23 +2486,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             self.progress_bar.unpause()
 
                     if do_autosave:
-                        if self.progress_bar is not None:
-                            self.progress_bar.pause()
-                        try:
-                            print_acc(f"\nAutosaving at step {self.step_num}")
-                            self.save(self.step_num, save_prefix=self.AUTOSAVE_PREFIX)
-                            self.ensure_params_requires_grad()
-                            optimizer.zero_grad()
-                            flush()
-                            flush_next = True
-                        except Exception as e:
-                            print_acc(f"Autosave failed at step {self.step_num}")
-                            print_acc(e)
-                            self.last_timed_save_time = time.time()
-                            traceback.print_exc()
-                        finally:
-                            if self.progress_bar is not None:
-                                self.progress_bar.unpause()
+                        flush_next = self.auto_save_manager.run_timed_autosave(optimizer) or flush_next
                             
                     if is_sample_step:
                         if self.progress_bar is not None:

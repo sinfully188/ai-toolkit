@@ -1,10 +1,18 @@
-import { JobWithPowerSummary, PowerUsageSummary } from '@/types';
+import { JobWithPowerSummary } from '@/types';
 import useGPUInfo from '@/hooks/useGPUInfo';
 import useCPUInfo from '@/hooks/useCPUInfo';
 import GPUWidget from '@/components/GPUWidget';
 import CPUWidget from '@/components/CPUWidget';
 import FilesWidget from '@/components/FilesWidget';
 import { getTotalSteps } from '@/utils/jobs';
+import {
+  getCurrentStepPauseSeconds,
+  MAX_THROTTLE_DELAY_SECONDS,
+  powerPercentToStepPauseSeconds,
+  stepPauseSecondsToPowerPercent,
+} from '@/liveControls/throttle';
+import { updateLiveThrottle } from '@/liveControls/api';
+import { formatPowerSummary } from '@/powerUsage/format';
 import { Cpu, HardDrive, Info, Gauge } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import useJobLog from '@/hooks/useJobLog';
@@ -12,72 +20,6 @@ import { apiClient } from '@/utils/api';
 
 interface JobOverviewProps {
   job: JobWithPowerSummary;
-}
-
-const MAX_THROTTLE_DELAY_SECONDS = 0.25;
-
-function getCurrentStepPauseSeconds(job: JobWithPowerSummary) {
-  try {
-    const jobConfig = JSON.parse(job.job_config);
-    const value = jobConfig?.config?.process?.[0]?.train?.step_pause_seconds ?? 0;
-    const numericValue = Number(value);
-    return Number.isFinite(numericValue) ? Math.max(0, numericValue) : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function stepPauseSecondsToPowerPercent(stepPauseSeconds: number) {
-  const clampedDelay = Math.min(MAX_THROTTLE_DELAY_SECONDS, Math.max(0, stepPauseSeconds));
-  return Math.round(((MAX_THROTTLE_DELAY_SECONDS - clampedDelay) / MAX_THROTTLE_DELAY_SECONDS) * 100);
-}
-
-function powerPercentToStepPauseSeconds(powerPercent: number) {
-  const clampedPercent = Math.min(100, Math.max(0, powerPercent));
-  const delay = ((100 - clampedPercent) / 100) * MAX_THROTTLE_DELAY_SECONDS;
-  return Math.round(delay * 1000) / 1000;
-}
-
-function formatProjectedCost(summary: PowerUsageSummary, currentStep: number, totalSteps: number) {
-  if (summary.estimatedCost == null) {
-    return '';
-  }
-
-  if (!Number.isFinite(currentStep) || !Number.isFinite(totalSteps) || currentStep <= 0 || totalSteps <= 0) {
-    return '';
-  }
-
-  const safeCurrentStep = Math.min(currentStep, totalSteps);
-  if (safeCurrentStep <= 0) {
-    return '';
-  }
-
-  const estimatedTotalCost = (summary.estimatedCost / safeCurrentStep) * totalSteps;
-  if (!Number.isFinite(estimatedTotalCost) || estimatedTotalCost < 0 || estimatedTotalCost > 1_000_000_000) {
-    return '';
-  }
-
-  return ` (estimating ${summary.currency ? `${summary.currency} ` : ''}${estimatedTotalCost.toFixed(2)} for ${totalSteps} steps)`;
-}
-
-function formatPowerSummary(summary: PowerUsageSummary | null | undefined, currentStep: number, totalSteps: number, jobStatus: string) {
-  if (!summary || summary.sampleCount <= 0) {
-    return null;
-  }
-
-  const averagePower = Math.round(summary.averagePowerW);
-  const peakPower = Math.round(summary.peakPowerW);
-  const energyKwh = summary.totalEnergyWh / 1000;
-  const costText =
-    summary.estimatedCost != null
-      ? ` | Cost ${summary.currency ? `${summary.currency} ` : ''}${summary.estimatedCost.toFixed(2)}`
-      : '';
-  const projectedCostText =
-    jobStatus === 'running' || jobStatus === 'queued' || jobStatus === 'stopping'
-      ? formatProjectedCost(summary, currentStep, totalSteps)
-      : '';
-
-  return `Avg ${averagePower} W | Peak ${peakPower} W | ${energyKwh.toFixed(2)} kWh${costText}${projectedCostText}`;
 }
 
 export default function JobOverview({ job }: JobOverviewProps) {
@@ -99,7 +41,12 @@ export default function JobOverview({ job }: JobOverviewProps) {
   const totalSteps = getTotalSteps(job);
   const progress = (job.step / totalSteps) * 100;
   const isStopping = job.stop && job.status === 'running';
-  const powerSummaryText = formatPowerSummary(job.powerSummary, job.step, totalSteps, job.status);
+  const powerSummaryText = formatPowerSummary(job.powerSummary, {
+    currentStep: job.step,
+    totalSteps,
+    jobStatus: job.status,
+    speedString: job.speed_string,
+  });
   const liveThrottleEnabled = ['running', 'queued', 'stopping'].includes(job.status);
   const [powerPercent, setPowerPercent] = useState(stepPauseSecondsToPowerPercent(currentStepPauseSeconds));
   const [isDraggingThrottle, setIsDraggingThrottle] = useState(false);
@@ -160,9 +107,7 @@ export default function JobOverview({ job }: JobOverviewProps) {
     setIsSavingThrottle(true);
     setThrottleError(null);
     try {
-      await apiClient.patch(`/api/jobs/${job.id}/throttle`, {
-        powerPercent: nextPowerPercent,
-      });
+      await updateLiveThrottle(job.id, nextPowerPercent);
       lastSavedPowerPercentRef.current = nextPowerPercent;
     } catch (error) {
       console.error('Error updating live throttle:', error);

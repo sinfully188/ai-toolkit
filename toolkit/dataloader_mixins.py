@@ -5,6 +5,7 @@ import json
 import math
 import os
 import random
+import subprocess
 from collections import OrderedDict
 from typing import TYPE_CHECKING, List, Dict, Union
 import traceback
@@ -121,6 +122,73 @@ def waveform_to_stereo(waveform):
         k = 0.7071
         return torch.stack([fl + k * fc + k * (bl + sl), fr + k * fc + k * (br + sr)])
     return waveform.mean(0, keepdim=True).expand(2, -1)
+
+
+def _probe_audio_sample_rate(path: str) -> int:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=sample_rate",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            sample_rate = result.stdout.strip().splitlines()
+            if sample_rate:
+                return int(sample_rate[0])
+    except Exception:
+        pass
+    return 48000
+
+
+def load_audio_waveform(path: str):
+    try:
+        import torchaudio
+
+        return torchaudio.load(path)
+    except Exception as torchaudio_error:
+        sample_rate = _probe_audio_sample_rate(path)
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                path,
+                "-vn",
+                "-ac",
+                "2",
+                "-ar",
+                str(sample_rate),
+                "-f",
+                "f32le",
+                "pipe:1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            if "does not contain any stream" in stderr or "matches no streams" in stderr:
+                return None, None
+            raise torchaudio_error
+
+        waveform = torch.frombuffer(result.stdout, dtype=torch.float32).clone()
+        waveform = waveform.reshape(-1, 2).transpose(0, 1).contiguous()
+        return waveform, sample_rate
 
 
 class CaptionMixin:
@@ -665,7 +733,6 @@ class ImageProcessingDTOMixin:
                 self.audio_tensor = None
 
                 try:
-                    import torchaudio
                     import torch.nn.functional as F
 
                     # Compute the time range of the selected frames in the *source* video
@@ -688,31 +755,31 @@ class ImageProcessingDTOMixin:
                     else:
                         target_duration = source_duration
 
-                    waveform, sample_rate = torchaudio.load(self.path)  # [channels, samples]
-                    
-                    waveform = waveform_to_stereo(waveform)  # Convert to stereo if not already
-                    
-                    if self.dataset_config.audio_normalize:
-                        peak = waveform.abs().amax()  # global peak across channels
-                        eps = 1e-9
-                        target_peak = 0.999  # ~ -0.01 dBFS
-                        gain = target_peak / (peak + eps)
-                        waveform = waveform * gain
+                    waveform, sample_rate = load_audio_waveform(self.path)  # [channels, samples]
+                    if waveform is not None:
+                        waveform = waveform_to_stereo(waveform)  # Convert to stereo if not already
 
-                    # Slice to the selected clip region (when we have a meaningful time range)
-                    if source_duration > 0.0:
-                        start_sample = int(round(clip_start_time * sample_rate))
-                        end_sample = int(round(clip_end_time * sample_rate))
-                        start_sample = max(0, min(start_sample, waveform.shape[-1]))
-                        end_sample = max(0, min(end_sample, waveform.shape[-1]))
-                        if end_sample > start_sample:
-                            waveform = waveform[..., start_sample:end_sample]
+                        if self.dataset_config.audio_normalize:
+                            peak = waveform.abs().amax()  # global peak across channels
+                            eps = 1e-9
+                            target_peak = 0.999  # ~ -0.01 dBFS
+                            gain = target_peak / (peak + eps)
+                            waveform = waveform * gain
+
+                        # Slice to the selected clip region (when we have a meaningful time range)
+                        if source_duration > 0.0:
+                            start_sample = int(round(clip_start_time * sample_rate))
+                            end_sample = int(round(clip_end_time * sample_rate))
+                            start_sample = max(0, min(start_sample, waveform.shape[-1]))
+                            end_sample = max(0, min(end_sample, waveform.shape[-1]))
+                            if end_sample > start_sample:
+                                waveform = waveform[..., start_sample:end_sample]
+                            else:
+                                # No valid audio segment
+                                waveform = None
                         else:
-                            # No valid audio segment
+                            # If we can't compute a meaningful time range, treat as no-audio
                             waveform = None
-                    else:
-                        # If we can't compute a meaningful time range, treat as no-audio
-                        waveform = None
 
                     if waveform is not None and waveform.numel() > 0:
                         target_samples = int(round(target_duration * sample_rate))

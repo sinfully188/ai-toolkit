@@ -9,6 +9,7 @@ from typing import Literal, Optional
 import threading
 import time
 import signal
+from extensions_built_in.sd_trainer.live_controls import LiveControlManager
 from toolkit.power_usage import PowerUsageTracker
 from toolkit.basic import flush
 from toolkit.print import print_acc
@@ -46,9 +47,11 @@ class DiffusionTrainer(SDTrainer):
                 sqlite_db_path=self.sqlite_db_path,
             )
             self.power_usage_tracker.start()
+            self.live_control_manager = LiveControlManager(self)
             # self.start_stop_watcher(interval_sec=2.0)
         else:
             self.power_usage_tracker = None
+            self.live_control_manager = None
     
     def start_stop_watcher(self, interval_sec: float = 5.0):
         """
@@ -144,102 +147,25 @@ class DiffusionTrainer(SDTrainer):
         raise last_error
 
     def should_stop(self):
-        if not self.is_ui_trainer:
-            return False
-        def _check_stop():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT stop FROM Job WHERE id = ?", (self.job_id,))
-                stop = cursor.fetchone()
-                return False if stop is None else stop[0] == 1
-
-        return self._retry_db_operation(_check_stop)
+        return False if self.live_control_manager is None else self.live_control_manager.should_stop()
 
     def should_return_to_queue(self):
-        if not self.is_ui_trainer:
-            return False
-        def _check_return_to_queue():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT return_to_queue FROM Job WHERE id = ?", (self.job_id,))
-                return_to_queue = cursor.fetchone()
-                return False if return_to_queue is None else return_to_queue[0] == 1
-
-        return self._retry_db_operation(_check_return_to_queue)
+        return False if self.live_control_manager is None else self.live_control_manager.should_return_to_queue()
 
     def refresh_live_training_controls(self):
-        if not self.is_ui_trainer:
-            return
-
-        def _read_job_config():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT job_config FROM Job WHERE id = ?", (self.job_id,)
-                )
-                row = cursor.fetchone()
-                return None if row is None else row[0]
-
-        try:
-            job_config_raw = self._retry_db_operation(_read_job_config)
-            if not job_config_raw:
-                return
-            job_config = json.loads(job_config_raw)
-            live_step_pause_seconds = (
-                job_config.get("config", {})
-                .get("process", [{}])[0]
-                .get("train", {})
-                .get("step_pause_seconds", self.train_config.step_pause_seconds)
-            )
-            self.train_config.step_pause_seconds = max(0.0, float(live_step_pause_seconds))
-        except Exception:
-            pass
+        if self.live_control_manager is not None:
+            self.live_control_manager.refresh_training_controls()
 
     def maybe_stop(self):
-        if not self.is_ui_trainer:
-            return
-        if self.should_stop():
-            self._run_async_operation(
-                self._update_status("stopped", "Job stopped"))
-            self.is_stopping = True
-            raise Exception("Job stopped")
-        if self.should_return_to_queue():
-            self._run_async_operation(
-                self._update_status("queued", "Job queued"))
-            self.is_stopping = True
-            raise Exception("Job returning to queue")
+        if self.live_control_manager is not None:
+            self.live_control_manager.maybe_stop()
 
     def should_save(self):
-        if not self.is_ui_trainer:
-            return False
-        def _check_save():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT save_now FROM Job WHERE id = ?", (self.job_id,))
-                save_now = cursor.fetchone()
-                return False if save_now is None else save_now[0] == 1
-
-        return self._retry_db_operation(_check_save)
+        return False if self.live_control_manager is None else self.live_control_manager.should_save()
 
     def maybe_save(self):
-        if not self.is_ui_trainer:
-            return
-        if self.should_save():
-            self.update_db_key("save_now", 0)
-            if self.progress_bar is not None:
-                self.progress_bar.pause()
-            print_acc(f"\nSaving at step {self.step_num}")
-            # clear any grads
-            self.optimizer.zero_grad()
-            self.save(self.step_num)
-            self.ensure_params_requires_grad()
-            flush()
-            if self.progress_bar is not None:
-                self.progress_bar.unpause()
-            self.save(self.step_num)
+        if self.live_control_manager is not None:
+            self.live_control_manager.maybe_save()
 
     async def _update_key(self, key, value):
         if not self.accelerator.is_main_process:

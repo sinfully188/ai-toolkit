@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import useJobsList from '@/hooks/useJobsList';
 import Link from 'next/link';
 import UniversalTable, { TableColumn } from '@/components/UniversalTable';
-import { GpuInfo, JobConfig, JobWithPowerSummary, PowerUsageSummary } from '@/types';
+import { GpuInfo, JobConfig, JobWithPowerSummary } from '@/types';
 import JobActionBar from './JobActionBar';
 import { Queue } from '@prisma/client';
 import useQueueList from '@/hooks/useQueueList';
@@ -10,27 +10,12 @@ import classNames from 'classnames';
 import { startQueue, stopQueue } from '@/utils/queue';
 import { CgSpinner } from 'react-icons/cg';
 import useGPUInfo from '@/hooks/useGPUInfo';
+import { formatPowerSummary } from '@/powerUsage/format';
 
 interface JobsTableProps {
   autoStartQueue?: boolean;
   onlyActive?: boolean;
   job_type?: string | null;
-}
-
-function formatPowerSummary(summary?: PowerUsageSummary | null) {
-  if (!summary || summary.sampleCount <= 0) {
-    return null;
-  }
-
-  const averagePower = Math.round(summary.averagePowerW);
-  const peakPower = Math.round(summary.peakPowerW);
-  const energyKwh = summary.totalEnergyWh / 1000;
-  const costText =
-    summary.estimatedCost != null
-      ? ` | Cost ${summary.currency ? `${summary.currency} ` : ''}${summary.estimatedCost.toFixed(2)}`
-      : '';
-
-  return `Avg ${averagePower} W | Peak ${peakPower} W | ${energyKwh.toFixed(2)} kWh${costText}`;
 }
 
 export default function JobsTable({ onlyActive = false, job_type = null }: JobsTableProps) {

@@ -1,18 +1,11 @@
 import type { Job } from '@prisma/client';
+import type { PowerUsageSummary } from '@/powerUsage/types';
+
+export type { PowerUsageSummary } from '@/powerUsage/types';
 
 /**
  * GPU API response
  */
-
-export interface PowerUsageSummary {
-  averagePowerW: number;
-  peakPowerW: number;
-  totalEnergyWh: number;
-  estimatedCost: number | null;
-  currency: string | null;
-  sampleCount: number;
-  finalStatus: string | null;
-}
 
 export type JobWithPowerSummary = Job & {
   powerSummary?: PowerUsageSummary | null;

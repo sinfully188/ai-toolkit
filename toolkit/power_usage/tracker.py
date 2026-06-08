@@ -3,63 +3,7 @@ import sqlite3
 import subprocess
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
-
-
-def read_power_usage_summary(log_file: str) -> Optional[Dict[str, object]]:
-    if not os.path.exists(log_file):
-        return None
-
-    keys = [
-        "average_power_w",
-        "peak_power_w",
-        "total_energy_wh",
-        "estimated_cost",
-        "sample_count",
-        "currency",
-        "final_status",
-    ]
-
-    try:
-        with sqlite3.connect(log_file, timeout=30.0) as conn:
-            cursor = conn.cursor()
-            placeholders = ", ".join("?" for _ in keys)
-            cursor.execute(
-                f"SELECT key, value FROM metadata WHERE key IN ({placeholders})",
-                keys,
-            )
-            rows = dict(cursor.fetchall())
-    except sqlite3.Error:
-        return None
-
-    sample_count_raw = rows.get("sample_count", "")
-    try:
-        sample_count = int(sample_count_raw) if str(sample_count_raw).strip() != "" else 0
-    except (TypeError, ValueError):
-        sample_count = 0
-
-    if sample_count <= 0:
-        return None
-
-    def _parse_float(key: str) -> Optional[float]:
-        value = rows.get(key, "")
-        try:
-            return float(value) if str(value).strip() != "" else None
-        except (TypeError, ValueError):
-            return None
-
-    currency = str(rows.get("currency", "") or "")
-    final_status = str(rows.get("final_status", "") or "")
-
-    return {
-        "average_power_w": _parse_float("average_power_w") or 0.0,
-        "peak_power_w": _parse_float("peak_power_w") or 0.0,
-        "total_energy_wh": _parse_float("total_energy_wh") or 0.0,
-        "estimated_cost": _parse_float("estimated_cost"),
-        "sample_count": sample_count,
-        "currency": currency or None,
-        "final_status": final_status or None,
-    }
+from typing import List, Optional, Tuple
 
 
 class PowerUsageTracker:
@@ -87,6 +31,8 @@ class PowerUsageTracker:
         self._sum_power_w = 0.0
         self._peak_power_w = 0.0
         self._last_sample_time: Optional[float] = None
+        self._db_conn: Optional[sqlite3.Connection] = None
+        self._db_lock = threading.RLock()
 
     def start(self) -> None:
         if not self._gpu_ids:
@@ -112,7 +58,44 @@ class PowerUsageTracker:
 
         self._ended_at = time.time()
         self._write_summary(final_status)
+        self._close_db()
         self.enabled = False
+
+    def _get_db_connection(self) -> sqlite3.Connection:
+        with self._db_lock:
+            if self._db_conn is None:
+                conn = sqlite3.connect(
+                    self.log_file,
+                    timeout=30.0,
+                    check_same_thread=False,
+                )
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
+                self._db_conn = conn
+            return self._db_conn
+
+    def _reset_db_connection(self) -> None:
+        with self._db_lock:
+            if self._db_conn is not None:
+                try:
+                    self._db_conn.close()
+                except sqlite3.Error:
+                    pass
+                self._db_conn = None
+
+    def _close_db(self) -> None:
+        self._reset_db_connection()
+
+    def _run_db_operation(self, operation, retry_on_open_error: bool = True):
+        try:
+            with self._db_lock:
+                return operation(self._get_db_connection())
+        except sqlite3.OperationalError as error:
+            if retry_on_open_error and "unable to open database file" in str(error).lower():
+                self._reset_db_connection()
+                with self._db_lock:
+                    return operation(self._get_db_connection())
+            raise
 
     def _get_gpu_ids_from_env(self) -> List[int]:
         raw_gpu_ids = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
@@ -166,9 +149,7 @@ class PowerUsageTracker:
             return False
 
     def _init_db(self) -> None:
-        with sqlite3.connect(self.log_file, timeout=30.0) as conn:
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("PRAGMA synchronous=NORMAL;")
+        def _init(conn: sqlite3.Connection) -> None:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS samples (
@@ -201,35 +182,39 @@ class PowerUsageTracker:
                     ("final_status", ""),
                 ],
             )
+            conn.commit()
+
+        self._run_db_operation(_init)
 
     def _restore_existing_state(self) -> None:
         if not os.path.exists(self.log_file):
             return
 
         try:
-            with sqlite3.connect(self.log_file, timeout=30.0) as conn:
+            def _read_existing(conn: sqlite3.Connection):
                 sample_totals = conn.execute(
                     "SELECT COUNT(*), COALESCE(SUM(total_power_w), 0.0), COALESCE(MAX(total_power_w), 0.0) FROM samples;"
                 ).fetchone()
-                if sample_totals is None:
-                    sample_count = 0
-                    sum_power_w = 0.0
-                    peak_power_w = 0.0
-                else:
-                    sample_count = int(sample_totals[0] or 0)
-                    sum_power_w = float(sample_totals[1] or 0.0)
-                    peak_power_w = float(sample_totals[2] or 0.0)
-
                 energies = conn.execute(
                     "SELECT energy_wh FROM samples ORDER BY timestamp ASC;"
                 ).fetchall()
-
                 metadata_rows = dict(
                     conn.execute(
                         "SELECT key, value FROM metadata WHERE key IN (?, ?);",
                         ("started_at", "total_energy_wh"),
                     ).fetchall()
                 )
+                return sample_totals, energies, metadata_rows
+
+            sample_totals, energies, metadata_rows = self._run_db_operation(_read_existing, retry_on_open_error=False)
+            if sample_totals is None:
+                sample_count = 0
+                sum_power_w = 0.0
+                peak_power_w = 0.0
+            else:
+                sample_count = int(sample_totals[0] or 0)
+                sum_power_w = float(sample_totals[1] or 0.0)
+                peak_power_w = float(sample_totals[2] or 0.0)
         except sqlite3.Error:
             return
 
@@ -254,7 +239,7 @@ class PowerUsageTracker:
 
         self._last_sample_time = None
 
-    def _rebuild_cumulative_energy_wh(self, energy_rows: List[Tuple[object]]) -> float:
+    def _rebuild_cumulative_energy_wh(self, energy_rows):
         completed_energy_wh = 0.0
         previous_energy_wh: Optional[float] = None
 
@@ -278,17 +263,23 @@ class PowerUsageTracker:
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
-            now = time.time()
-            total_power_w = self._read_total_power_w()
-            if total_power_w is not None:
-                if self._last_sample_time is not None:
-                    elapsed_hours = max(now - self._last_sample_time, 0.0) / 3600.0
-                    self._cumulative_energy_wh += total_power_w * elapsed_hours
-                self._last_sample_time = now
-                self._sample_count += 1
-                self._sum_power_w += total_power_w
-                self._peak_power_w = max(self._peak_power_w, total_power_w)
-                self._write_sample(now, total_power_w)
+            try:
+                now = time.time()
+                total_power_w = self._read_total_power_w()
+                if total_power_w is not None:
+                    if self._last_sample_time is not None:
+                        elapsed_hours = max(now - self._last_sample_time, 0.0) / 3600.0
+                        self._cumulative_energy_wh += total_power_w * elapsed_hours
+                    self._last_sample_time = now
+                    self._sample_count += 1
+                    self._sum_power_w += total_power_w
+                    self._peak_power_w = max(self._peak_power_w, total_power_w)
+                    self._write_sample(now, total_power_w)
+            except sqlite3.Error as error:
+                self._reset_db_connection()
+                print(f"[AITK] Power tracker SQLite error: {error}")
+            except Exception as error:
+                print(f"[AITK] Power tracker error: {error}")
 
             self._stop_event.wait(self.sample_interval_secs)
 
@@ -323,7 +314,7 @@ class PowerUsageTracker:
         return total_power_w
 
     def _write_sample(self, timestamp: float, total_power_w: float) -> None:
-        with sqlite3.connect(self.log_file, timeout=30.0) as conn:
+        def _write(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "INSERT OR REPLACE INTO samples(timestamp, total_power_w, energy_wh) VALUES(?, ?, ?);",
                 (timestamp, total_power_w, self._cumulative_energy_wh),
@@ -332,28 +323,37 @@ class PowerUsageTracker:
                 "INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
                 self._summary_metadata_rows(),
             )
+            conn.commit()
+
+        self._run_db_operation(_write)
 
     def _write_summary(self, final_status: str) -> None:
-        with sqlite3.connect(self.log_file, timeout=30.0) as conn:
+        def _write(conn: sqlite3.Connection) -> None:
             conn.executemany(
                 "INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
                 self._summary_metadata_rows(final_status),
             )
+            conn.commit()
+
+        self._run_db_operation(_write)
 
     def _write_summary_metadata(self) -> None:
-        with sqlite3.connect(self.log_file, timeout=30.0) as conn:
+        def _write(conn: sqlite3.Connection) -> None:
             conn.executemany(
                 "INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
                 self._summary_metadata_rows(),
             )
+            conn.commit()
 
-    def _summary_metadata_rows(self, final_status: Optional[str] = None) -> List[Tuple[str, str]]:
+        self._run_db_operation(_write)
+
+    def _summary_metadata_rows(self, final_status: Optional[str] = None):
         average_power_w = self._sum_power_w / self._sample_count if self._sample_count > 0 else 0.0
         total_cost = None
         if self._rate_per_kwh is not None:
             total_cost = (self._cumulative_energy_wh / 1000.0) * self._rate_per_kwh
 
-        rows: List[Tuple[str, str]] = [
+        rows = [
             ("total_energy_wh", str(self._cumulative_energy_wh)),
             ("average_power_w", str(average_power_w)),
             ("peak_power_w", str(self._peak_power_w)),
