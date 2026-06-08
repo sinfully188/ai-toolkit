@@ -267,6 +267,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.resume_save_prefix = ''
         self.last_timed_save_time = time.time()
         self.auto_save_manager = AutoSaveManager(self)
+        self.additional_logs = {}
 
     def post_process_generate_image_config_list(self, generate_image_config_list: List[GenerateImageConfig]):
         # override in subclass
@@ -2199,6 +2200,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
             # Update the learning rates if they changed
             # optimizer.param_groups = previous_params
 
+        # set up the ema now that the optimizer (and its params) are ready
+        self.setup_ema()
+
         lr_scheduler_params = self.train_config.lr_scheduler_params
 
         # make sure it had bare minimum
@@ -2529,6 +2533,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                     self.logger.log({
                                         f'loss/{key}': value,
                                     })
+                            if self.additional_logs is not None:
+                                for key, value in self.additional_logs.items():
+                                    self.logger.log({
+                                        key: value,
+                                    })
+                                self.additional_logs = {}
                     elif self.logging_config.log_every is None:
                         if self.accelerator.is_main_process:
                             # log every step
@@ -2539,6 +2549,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                 self.logger.log({
                                     f'loss/{key}': value,
                                 })
+                            if self.additional_logs is not None:
+                                for key, value in self.additional_logs.items():
+                                    self.logger.log({
+                                        key: value,
+                                    })
+                                self.additional_logs = {}
 
 
                     if self.performance_log_every > 0 and self.step_num % self.performance_log_every == 0:

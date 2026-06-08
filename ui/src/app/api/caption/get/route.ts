@@ -18,17 +18,17 @@ export async function POST(request: NextRequest) {
     return new NextResponse(null, { status: 499 });
   }
 
-  const { imgPath } = body;
+  const { imgPath, ext } = body;
   console.log('Received POST request for caption:', imgPath);
   try {
     // Decode the path
     const filepath = imgPath;
     console.log('Decoded image path:', filepath);
-
     const resolvedFilePath = path.resolve(filepath);
 
-    // caption name is the filepath without extension but with .txt
-    const captionPath = resolvedFilePath.replace(/\.[^/.]+$/, '') + '.txt';
+    // caption name is the filepath without extension but with the caption extension (default txt)
+    const captionExt = ((ext || 'txt') as string).replace(/^\.+/, '').trim() || 'txt';
+    const captionPath = resolvedFilePath.replace(/\.[^/.]+$/, '') + '.' + captionExt;
 
     // Get allowed directories
     const allowedDir = await getDatasetsRoot();
