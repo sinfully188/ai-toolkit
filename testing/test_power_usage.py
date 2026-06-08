@@ -60,6 +60,10 @@ def _create_broken_resume_log(log_db_path):
         )
 
 
+def _create_invalid_log_file(log_db_path):
+    Path(log_db_path).write_text("this is not sqlite", encoding="utf-8")
+
+
 class PowerUsageTrackerResumeTests(unittest.TestCase):
     def test_restore_existing_state_rebuilds_cumulative_energy_across_resumes(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -90,6 +94,33 @@ class PowerUsageTrackerResumeTests(unittest.TestCase):
             self.assertEqual(float(summary_rows["average_power_w"]), 120.0)
             self.assertEqual(float(summary_rows["total_energy_wh"]), 25.0)
             self.assertEqual(float(summary_rows["estimated_cost"]), 0.05)
+
+    def test_init_db_recreates_invalid_power_log_database(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            save_root = tmp_path / "job-output"
+            save_root.mkdir()
+            settings_db_path = tmp_path / "aitk.db"
+            _create_settings_db(str(settings_db_path))
+
+            log_db_path = save_root / "power_log.db"
+            _create_invalid_log_file(log_db_path)
+
+            tracker = PowerUsageTracker(
+                save_root=str(save_root),
+                sqlite_db_path=str(settings_db_path),
+            )
+
+            tracker._init_db()
+
+            archived_logs = list(save_root.glob("power_log.db.invalid.*"))
+            self.assertEqual(len(archived_logs), 1)
+
+            with sqlite3.connect(log_db_path) as conn:
+                tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+            self.assertIn("samples", tables)
+            self.assertIn("metadata", tables)
 
 
 if __name__ == "__main__":

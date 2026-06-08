@@ -64,15 +64,57 @@ class PowerUsageTracker:
     def _get_db_connection(self) -> sqlite3.Connection:
         with self._db_lock:
             if self._db_conn is None:
-                conn = sqlite3.connect(
-                    self.log_file,
-                    timeout=30.0,
-                    check_same_thread=False,
-                )
-                conn.execute("PRAGMA journal_mode=WAL;")
-                conn.execute("PRAGMA synchronous=NORMAL;")
-                self._db_conn = conn
+                self._db_conn = self._open_log_db_connection()
             return self._db_conn
+
+    def _open_log_db_connection(self) -> sqlite3.Connection:
+        try:
+            conn = sqlite3.connect(
+                self.log_file,
+                timeout=30.0,
+                check_same_thread=False,
+            )
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            return conn
+        except sqlite3.DatabaseError as error:
+            self._archive_invalid_log_db(error)
+            conn = sqlite3.connect(
+                self.log_file,
+                timeout=30.0,
+                check_same_thread=False,
+            )
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            return conn
+
+    def _archive_invalid_log_db(self, error: sqlite3.DatabaseError) -> None:
+        if not os.path.exists(self.log_file):
+            raise error
+
+        error_message = str(error).lower()
+        if "not a database" not in error_message and "malformed" not in error_message:
+            raise error
+
+        timestamp = int(time.time())
+        invalid_log_file = f"{self.log_file}.invalid.{timestamp}"
+        try:
+            os.replace(self.log_file, invalid_log_file)
+        except OSError:
+            raise error
+
+        wal_file = f"{self.log_file}-wal"
+        shm_file = f"{self.log_file}-shm"
+        for sidecar_path in (wal_file, shm_file):
+            if os.path.exists(sidecar_path):
+                try:
+                    os.remove(sidecar_path)
+                except OSError:
+                    pass
+
+        print(
+            f"PowerUsageTracker: archived invalid power log database to {invalid_log_file} after sqlite error: {error}"
+        )
 
     def _reset_db_connection(self) -> None:
         with self._db_lock:
